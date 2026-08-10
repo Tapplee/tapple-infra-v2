@@ -109,21 +109,28 @@ helm lint charts/tapple-server --set image.tag=test
 ①infra/node-bootstrap.sh  →  ②infra/k3s-setup.sh  →  ③시크릿 9종  →  앱 Running
 ```
 
-②의 마지막 스텝이 `bootstrap/root-app.yaml`을 apply하고, 그때 sealed-secrets 컨트롤러가 뜬다. 시크릿은 **그 뒤에만** 만들 수 있어서(클러스터 공개키로 암호화) 그전까지 앱·DB 파드는 CrashLoop가 정상이다.
+②의 마지막 스텝이 `bootstrap/root-app.yaml`을 apply하고, 그때 sealed-secrets 컨트롤러가 뜬다. 시크릿을 **새로 만들어야 하는 경우**엔 그 뒤에만 가능하다(클러스터 공개키로 암호화) — 그전까지 DB·grafana·alertmanager 파드는 `CreateContainerConfigError`가 정상이다.
+
+이미 `secrets/`에 SealedSecret이 커밋돼 있으므로 **같은 컨트롤러 키를 복원한 경우엔** ③이 자동으로 풀린다. 키를 잃으면 전부 재생성이다 — `secrets/README.md`의 개인키 백업 절차를 반드시 해둘 것.
+
+앱 파드는 `image.tag`가 비어 있으면 Application이 `Unknown`으로 남는다(의도된 가드). tapple-be의 `cd-gitops.yml`이 태그를 커밋해야 뜬다.
 
 ## 남은 TODO
 
-- [ ] 시크릿 9종 생성 — prod 6 + dev 3 (`secrets/README.md`)
+- [ ] Discord webhook 실값 — 지금은 더미라 알림이 아무데도 가지 않는다 (홈서버 `.env`도 `CHANGEME`)
+- [ ] 컷오버 전 로테이션 — AWS 키·Google 시크릿·JWT 키. 지금 클러스터엔 앞 둘이 더미로 들어가 있다
+- [ ] `ghcr-pull` 시크릿 2종 — 첫 이미지가 ghcr에 올라간 뒤. 패키지를 public으로 두면 불필요
 - [ ] 도메인 확정 — 지금은 nip.io. `charts/tapple-server/values.yaml`·`values-dev.yaml`의 `ingress.host` 두 줄
 - [ ] tapple-be에 `INFRA_REPO_TOKEN` 시크릿 등록 + `cd-gitops.yml` push 트리거 주석 해제 (컷오버 시)
 - [ ] upstream 차트 버전 5종 설치 시점 최신 고정 (sealed-secrets + monitoring 4종 — 내부 이미지 태그는 compose와 동일하게 이미 고정)
-- [ ] k3s·ArgoCD 버전 고정 (`infra/k3s-setup.sh`) — 재구축 재현성
 - [ ] iwinv 플랜 상품 코드·월 요금 확인 — 매니페스트는 **8 vCPU / 32GB** 기준
 - [ ] Traefik `trustedIPs`(Cloudflare 대역) — 없으면 로그·레이트리밋에 실 사용자 IP 대신 Cloudflare IP가 찍힘
 - [ ] ghcr retention — 오래된 이미지 자동 삭제 (최근 N개 + 배포 중 태그는 보존)
 - [ ] 매니페스트 lint CI (helm template·kubeconform)
 - [ ] 팀원 kubeconfig 발급 — [docs/db-access.md](docs/db-access.md) §6 (토큰 기본 90일, 만료 시 재발급)
 - [ ] BE의 `prod` 프로파일에서 CloudWatch appender 제거 또는 k3s 전용 프로파일 — AWS 떠난 뒤엔 무의미
+- [x] 시크릿 7종 씰링 (`secrets/`) — 부팅 필수값만 실값, 나머지 더미
+- [x] k3s v1.36.3+k3s1 · ArgoCD v3.5.0 버전 고정 (`infra/k3s-setup.sh`)
 - [x] DB명(`tapple`)·Hikari 풀(10) ↔ `max_connections=60` 매칭
 - [x] 알림 채널 — Discord webhook, 기존 alertmanager 라우팅 그대로
 - [x] 모니터링 원본/산출물 경계 — 원본은 v1 유지, 여기는 산출물만
