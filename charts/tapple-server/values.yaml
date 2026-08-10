@@ -48,10 +48,12 @@ resources:
 
 # 평문 OK인 환경변수만. 자격증명은 전부 existingSecret으로
 env:
-  # otel을 더해야 OTLP push가 켜진다 (taple-be application-otel.yml)
-  # TODO(컷오버): prod 프로파일은 logback에 AwsLogsAppender(CloudWatch)를 물린다 —
-  #   AWS 떠난 뒤엔 BE에서 그 appender를 빼거나 k3s 전용 프로파일을 만들 것
-  SPRING_PROFILES_ACTIVE: prod,otel
+  # otel: OTLP push 활성 (taple-be application-otel.yml)
+  # k3s: CloudWatch appender 를 떼는 스위치. 없으면 logback 의 prod 블록이 AwsLogsAppender 를
+  #      붙이고, 클러스터에 AWS 자격증명이 없어 무한 재시도하며 로그를 자기 에러로 채운다.
+  # prod 는 반드시 유지하고 첫 자리에 둔다 — QaController 의 @Profile("!prod") 가 QA 엔드포인트를
+  #      차단하고, CaffeineCacheGatewayImpl 이 activeProfiles.firstOrNull() 을 본다.
+  SPRING_PROFILES_ACTIVE: prod,otel,k3s
   # 대시보드·알림이 이 값을 그대로 쓴다 (Prometheus 의 application 라벨, Loki·Tempo 의 service_name).
   # prod 는 taple, dev 는 taple-dev — 대시보드 Service 드롭다운에서 골라 본다.
   # Loki 로그 알림 규칙이 {service_name="taple"} 로 하드코딩돼 있어 이 값을 바꾸면 그 알림이 죽는다.
