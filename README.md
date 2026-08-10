@@ -4,7 +4,9 @@
 
 앱 코드는 [tapple-be](https://github.com/Tapplee/tapple-be), AWS 시절 인프라와 **모니터링 대시보드 원본**은 [tapple-infra](https://github.com/Tapplee/tapple-infra)(v1), 부하 리그는 [tapple-loadtest](https://github.com/Tapplee/tapple-loadtest).
 
-> 현재 상태: **임시 VPS(141.164.40.139, 8 vCPU/31GB Ubuntu 24.04)에서 검증 중.** ingress host는 `*.141.164.40.139.nip.io`로 잡혀 있다. iwinv 노드로 옮길 때 values의 host 두 줄만 실도메인으로 교체.
+> 현재 상태: **임시 VPS에서 검증 중** (8 vCPU/31GB Ubuntu 24.04). ingress host는 그 VPS의 `nip.io` 주소로 잡혀 있다. iwinv 노드로 옮길 때 values의 host 두 줄만 실도메인으로 교체.
+
+**이 레포는 public이다.** SealedSecret 암호문만 커밋하고 평문 시크릿은 절대 올리지 않는다(secret scanning + push protection 켜져 있음). ArgoCD는 public 레포라 자격증명 없이 pull한다 — private로 되돌리면 deploy key 등록이 필요해진다.
 
 ## 구조
 
