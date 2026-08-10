@@ -17,8 +17,11 @@
 | 핵심 원칙 | 비용 최소화, 단일 노드(SPOF 감수, RTO ~10분), 배포·복구 자동화 |
 
 ### As-Is
-- App: **홈서버(맥) + docker compose**, GitHub Actions self-hosted runner(`deploy.yml`)가 main push마다 재기동
-- DB: 같은 홈서버의 `postgres:16-alpine` 컨테이너
+**실운영은 두 갈래이고 k3s는 아직 테스트다.** 홈서버를 폐기할 계획이 아니다.
+
+- 로컬: 개발자 각자 `docker-compose-dev.yml` (postgres 포트 미노출)
+- 홈서버(맥) + docker compose, GitHub Actions self-hosted runner(`deploy.yml`)가 main push마다 재기동
+- DB: 같은 홈서버의 `postgres:16-alpine` 컨테이너 — DB명 `tapple`, 유저 `tapple` (`.env` 실측)
 - 레거시: AWS EC2 + Docker Hub 경로(`cicd-prod.yml`)가 workflow_dispatch 전용으로 남아 있음 (백업 경로)
 - 관측: `tapple-infra`(v1)의 compose Grafana 스택 — 부하 리그와 공용
 - 비용: 홈서버 전기·회선 (클라우드 청구 없음). **iwinv 이전 시 월 요금이 새로 생긴다** — TODO: 상품 코드·요금 확인 후 이 줄에 기입
@@ -28,7 +31,7 @@
 - **App도 DB도 k3s 안** — 클러스터 상태 전체가 Git으로 복원됨
 - OTel 풀스택 자체 호스팅 + ArgoCD GitOps + Cloudflare 프론트
 
-### 이전으로 얻는 것 (홈서버 대비)
+### 이전으로 얻는 것 (홈서버 대비 — 컷오버 시점은 미정)
 - 배포가 `git push` → ArgoCD pull로 바뀜. self-hosted runner가 맥에 붙어 있을 필요 없음
 - 롤백이 Git revert 한 번. 지금은 compose 재기동
 - prod/dev 분리가 네임스페이스로 생김 (현재 dev는 사실상 없음)

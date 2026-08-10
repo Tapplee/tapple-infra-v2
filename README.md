@@ -78,7 +78,7 @@ python3 scripts/gen-configmaps.py /다른/경로/config       # 원본 위치가
 |---|---|---|---|
 | prod PostgreSQL | 8Gi / 2000m | 8Gi / 2000m | **Guaranteed** |
 | prod 앱 | 4Gi / 1000m | 6Gi / 3000m | Burstable |
-| dev PostgreSQL | 2Gi / 250m | 2Gi / 1000m | Guaranteed |
+| dev PostgreSQL | 2Gi / 250m | 2Gi / 1000m | Burstable |
 | dev 앱 | 2Gi / 250m | 3Gi / 1500m | Burstable |
 | 모니터링 스택 전체 | ~2.2Gi / 440m | ~3.3Gi | Burstable |
 | ArgoCD + Traefik + sealed-secrets | ~1.3Gi / 530m | ~2Gi | Burstable |
