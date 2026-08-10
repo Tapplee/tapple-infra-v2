@@ -1,0 +1,105 @@
+# Grafana — 대시보드는 기존 infra/monitoring 것을 ConfigMap(sidecar)으로 로드
+# datasource uid(prometheus/loki/tempo)는 대시보드 JSON이 참조하므로 로컬 스택과 동일하게 유지
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: grafana
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: grafana
+    # TODO(Phase 6): 설치 시점 최신 안정 버전 고정
+    targetRevision: 8.8.0
+    helm:
+      valuesObject:
+        fullnameOverride: grafana
+        image:
+          tag: 13.0.1 # compose와 동일
+        # secrets/grafana-admin.yaml (SealedSecret, monitoring 네임스페이스)
+        admin:
+          existingSecret: grafana-admin
+          userKey: admin-user
+          passwordKey: admin-password
+        persistence:
+          enabled: true
+          storageClassName: local-path
+          size: 1Gi
+        resources:
+          requests: { cpu: 100m, memory: 256Mi }
+          limits: { memory: 512Mi }
+        testFramework:
+          enabled: false
+        # manifests/monitoring/dashboards/의 ConfigMap(label: grafana_dashboard=1)을 자동 로드
+        sidecar:
+          dashboards:
+            enabled: true
+            label: grafana_dashboard
+            labelValue: "1"
+            searchNamespace: monitoring
+            provider:
+              folder: tapple
+        datasources:
+          datasources.yaml:
+            apiVersion: 1
+            # 로컬 provisioning에서 cloudwatch(AWS 떠남)만 제외
+            datasources:
+              - name: Alertmanager
+                type: alertmanager
+                uid: alertmanager
+                access: proxy
+                url: http://prometheus-alertmanager.monitoring.svc.cluster.local:9093
+                jsonData:
+                  implementation: prometheus
+              - name: Prometheus
+                type: prometheus
+                uid: prometheus
+                access: proxy
+                url: http://prometheus-server.monitoring.svc.cluster.local:80
+                isDefault: true
+                jsonData:
+                  timeInterval: 30s
+              - name: Loki
+                type: loki
+                uid: loki
+                access: proxy
+                url: http://loki.monitoring.svc.cluster.local:3100
+                jsonData:
+                  derivedFields:
+                    - datasourceUid: tempo
+                      matcherRegex: '"traceId":"(\w+)"'
+                      name: traceId
+                      url: '$${__value.raw}'
+              - name: Tempo
+                type: tempo
+                uid: tempo
+                access: proxy
+                # grafana/tempo 차트의 http_listen_port 기본값 3100 (로컬 3200과 다름)
+                url: http://tempo.monitoring.svc.cluster.local:3100
+                jsonData:
+                  tracesToLogsV2:
+                    datasourceUid: loki
+                    filterByTraceID: true
+                  tracesToMetrics:
+                    datasourceUid: prometheus
+                  serviceMap:
+                    datasourceUid: prometheus
+                  nodeGraph:
+                    enabled: true
+        # TODO(Phase 5/7): ingress + grafana 서브도메인 + Cloudflare Access
+        ingress:
+          enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - CreateNamespace=true

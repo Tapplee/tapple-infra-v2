@@ -1,0 +1,29 @@
+# dev 앱 — prod와 같은 차트, values-dev.yaml만 덮어씀
+# CI: develop 브랜치 머지 → 이 파일이 아니라 charts/tapple-server/values-dev.yaml의 image.tag가 bump됨
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dev-tapple-server
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Tapplee/tapple-infra-v2.git
+    targetRevision: main
+    path: charts/tapple-server
+    helm:
+      # 뒤 파일이 앞을 덮어쓴다 — 공통값은 values.yaml, 차이만 values-dev.yaml
+      valueFiles:
+        - values.yaml
+        - values-dev.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dev-app
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true

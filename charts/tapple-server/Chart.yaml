@@ -1,0 +1,8 @@
+apiVersion: v2
+name: tapple-server
+type: application
+description: tapple Spring Boot 백엔드 (k3s 단일 노드 배포용)
+# 차트 자체 버전 — 차트 파일 수정 시마다 bump
+version: 0.1.0
+# 앱 버전 — 실제 배포 태그는 values.image.tag가 우선
+appVersion: "0.1.0"

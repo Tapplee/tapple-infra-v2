@@ -1,0 +1,84 @@
+# OTel Collector — OTLP 게이트웨이 (infra/monitoring otel-collector 설정의 k8s 이식판)
+# 앱은 OTEL_URL=http://otel-collector.monitoring.svc.cluster.local:4318 만 보면 됨
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: otel-collector
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts
+    chart: opentelemetry-collector
+    # TODO(Phase 6): 설치 시점 helm search로 최신 안정 버전 고정
+    targetRevision: 0.110.0
+    helm:
+      valuesObject:
+        fullnameOverride: otel-collector
+        mode: deployment
+        replicaCount: 1
+        image:
+          # contrib 배포판 — probabilistic_sampler 포함
+          repository: otel/opentelemetry-collector-contrib
+          tag: 0.152.0 # compose와 동일
+        resources:
+          requests: { cpu: 100m, memory: 256Mi }
+          limits: { memory: 512Mi }
+        config:
+          receivers:
+            # 로컬 스택의 bearer token 인증은 제거 — 클러스터 내부 ClusterIP 통신만 존재
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:4317
+                http:
+                  endpoint: 0.0.0.0:4318
+            # 차트 기본 config에 포함된 미사용 리시버 비활성화
+            jaeger: null
+            zipkin: null
+            prometheus: null
+          processors:
+            batch:
+              send_batch_size: 1024
+              timeout: 5s
+            # head sampling 10% (트레이스만 — 메트릭·로그는 전량).
+            # 32GB로 올린 뒤에도 유지 — 메모리보다 Tempo 디스크(PVC 5Gi)가 먼저 찬다
+            probabilistic_sampler:
+              sampling_percentage: 10
+          exporters:
+            otlphttp/prometheus:
+              endpoint: http://prometheus-server.monitoring.svc.cluster.local:80/api/v1/otlp
+              tls: { insecure: true }
+            otlphttp/tempo:
+              endpoint: http://tempo.monitoring.svc.cluster.local:4318
+              tls: { insecure: true }
+            otlphttp/loki:
+              endpoint: http://loki.monitoring.svc.cluster.local:3100/otlp
+              tls: { insecure: true }
+          service:
+            pipelines:
+              metrics:
+                receivers: [otlp]
+                processors: [batch]
+                exporters: [otlphttp/prometheus]
+              traces:
+                receivers: [otlp]
+                processors: [probabilistic_sampler, batch]
+                exporters: [otlphttp/tempo]
+              logs:
+                receivers: [otlp]
+                processors: [batch]
+                exporters: [otlphttp/loki]
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - CreateNamespace=true

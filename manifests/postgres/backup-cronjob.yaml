@@ -1,0 +1,95 @@
+# pg_dump → iwinv 오브젝트 스토리지 (계획 D14, Phase 9)
+# 매일 03:00 KST(= 18:00 UTC). 배포 직전 백업은 CI가 `kubectl create job --from=cronjob/pg-backup`으로 트리거
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pg-backup
+  labels:
+    app.kubernetes.io/name: pg-backup
+    app.kubernetes.io/component: backup
+spec:
+  schedule: "0 18 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: pg-backup
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            # 1단계: 덤프 생성
+            - name: dump
+              image: postgres:16 # StatefulSet 이미지와 동일 버전 유지
+              command: ["sh", "-c"]
+              args:
+                - pg_dump -Fc -f "/backup/taple-$(date +%Y%m%d-%H%M%S).dump" && ls -lh /backup
+              env:
+                - name: PGHOST
+                  value: postgres.db.svc.cluster.local
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef: { name: postgres-secrets, key: POSTGRES_USER }
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: postgres-secrets, key: POSTGRES_PASSWORD }
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef: { name: postgres-secrets, key: POSTGRES_DB }
+              securityContext:
+                runAsUser: 999
+                runAsGroup: 999
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 100m, memory: 256Mi }
+                limits: { cpu: 500m, memory: 512Mi }
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+          containers:
+            # 2단계: S3 호환 업로드 (iwinv 오브젝트 스토리지)
+            - name: upload
+              image: amazon/aws-cli:2.22.35
+              command: ["sh", "-c"]
+              args:
+                # TODO(Phase 9): 보존 정책(일 7 / 주 4) — 버킷 lifecycle 지원 확인, 미지원 시 여기서 오래된 키 삭제
+                - aws s3 cp /backup/ "s3://${S3_BUCKET}/pg-backup/" --recursive --endpoint-url "${S3_ENDPOINT}"
+              env:
+                - name: HOME
+                  value: /tmp
+              envFrom:
+                # secrets/backup-s3.yaml (SealedSecret): AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / S3_ENDPOINT / S3_BUCKET
+                - secretRef:
+                    name: backup-s3
+              securityContext:
+                runAsUser: 1000
+                runAsGroup: 1000
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: backup
+              emptyDir:
+                sizeLimit: 5Gi
+            - name: tmp
+              emptyDir: {}

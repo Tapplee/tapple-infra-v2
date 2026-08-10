@@ -1,0 +1,38 @@
+# dev 환경 오버라이드 — values.yaml 위에 덮어씀 (여기 없는 값은 prod와 동일)
+# CI: develop 브랜치 머지 시 Actions가 이 파일의 image.tag만 bump
+
+image:
+  tag: ""
+
+ingress:
+  enabled: true
+  # TODO: iwinv 컷오버 시 실도메인으로 교체 (dev-api.taple.co.kr 등)
+  host: dev-api.141.164.40.139.nip.io
+
+# prod의 1/2. 압박 시 가장 먼저 축출되도록 우선순위도 최하
+# requests는 낮게(자리만 확보), limits는 넉넉히 — 유휴 CPU는 어차피 놀고 있다
+resources:
+  requests:
+    cpu: 250m
+    memory: 2Gi
+  limits:
+    cpu: 1500m
+    memory: 3Gi
+
+priorityClassName: dev-low
+
+env:
+  SPRING_PROFILES_ACTIVE: dev,otel
+  # service_name은 prod와 같게 두고(대시보드 필터가 taple 고정), 환경은 DEPLOY_ENV로 구분
+  SPRING_APPLICATION_NAME: taple
+  DEPLOY_ENV: dev
+  POSTGRES_URL: jdbc:postgresql://postgres.dev-db.svc.cluster.local:5432/taple_dev
+  # 관측 스택은 prod와 공유 — deployment_environment=dev 라벨로 구분해서 본다
+  OTEL_URL: http://otel-collector.monitoring.svc.cluster.local:4318
+
+# 기동 여유는 prod보다 넉넉히 (CPU가 적어 느림)
+probes:
+  startup:
+    path: /actuator/health/liveness
+    failureThreshold: 60
+    periodSeconds: 5

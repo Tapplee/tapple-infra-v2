@@ -1,0 +1,29 @@
+# 모니터링 설정 ConfigMap들 — 대시보드 8개 + prometheus·loki 알림 규칙
+# 원본은 infra/monitoring/grafana/config, 변환은 scripts/gen-configmaps.py
+# wave 2 동순위 (Grafana sidecar·rule 마운트가 알아서 집어감)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-config
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Tapplee/tapple-infra-v2.git
+    targetRevision: main
+    path: manifests/monitoring
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - CreateNamespace=true

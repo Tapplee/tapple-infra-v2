@@ -1,0 +1,145 @@
+# Prometheus + Alertmanager + node-exporter — 기존 compose 스택(ADR-014)의 k8s 이식판
+# 버전·retention·알림 라우팅 전부 infra/monitoring/grafana 값 그대로
+# 수신 2경로 유지: ① OTLP write receiver ② scrape (앱 파드는 prometheus.io/scrape 어노테이션)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: prometheus
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: prometheus
+    # TODO(Phase 6): 설치 시점 최신 안정 차트 버전 고정 (내부 이미지 태그는 아래서 compose와 동일하게 고정)
+    targetRevision: 27.3.0
+    helm:
+      valuesObject:
+        server:
+          image:
+            tag: v3.11.3 # compose와 동일
+          retention: 14d # compose --storage.tsdb.retention.time=14d
+          extraFlags:
+            - web.enable-lifecycle
+            - web.enable-otlp-receiver # otel-collector의 메트릭 push 경로
+          global:
+            scrape_interval: 30s
+            evaluation_interval: 30s
+          persistentVolume:
+            enabled: true
+            storageClass: local-path
+            size: 10Gi
+          resources:
+            requests: { cpu: 100m, memory: 768Mi }
+            limits: { memory: 1Gi }
+          # 알림 규칙 468줄은 ConfigMap(manifests/monitoring/prometheus-alert-rules.yaml)로 마운트
+          extraConfigmapMounts:
+            - name: alert-rules
+              configMap: prometheus-alert-rules
+              mountPath: /etc/config/rules-extra
+              readOnly: true
+        serverFiles:
+          prometheus.yml:
+            rule_files:
+              - /etc/config/rules-extra/default-alerts.yml
+        # 로컬 prometheus.yml의 static 잡들 — k8s 서비스 DNS로 치환
+        # (앱은 차트 기본 kubernetes-pods 잡이 어노테이션 보고 수집하므로 별도 잡 불필요)
+        extraScrapeConfigs: |
+          - job_name: node-exporter
+            static_configs:
+              - targets: ['node-exporter.monitoring.svc.cluster.local:9100']
+                labels:
+                  os: linux # node-exporter-host 대시보드의 OS 드롭다운이 참조
+          - job_name: loki
+            static_configs:
+              - targets: ['loki.monitoring.svc.cluster.local:3100']
+          - job_name: otel-collector
+            static_configs:
+              - targets: ['otel-collector.monitoring.svc.cluster.local:8888']
+          - job_name: grafana
+            static_configs:
+              - targets: ['grafana.monitoring.svc.cluster.local:80']
+          - job_name: alertmanager
+            static_configs:
+              - targets: ['prometheus-alertmanager.monitoring.svc.cluster.local:9093']
+        alertmanager:
+          enabled: true
+          image:
+            repository: quay.io/prometheus/alertmanager
+            tag: v0.32.1 # compose와 동일
+          persistence:
+            enabled: true
+            storageClass: local-path
+            size: 1Gi
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { memory: 128Mi }
+          # Discord webhook URL은 SealedSecret(alertmanager-discord)에서 파일로 마운트
+          extraSecretMounts:
+            - name: discord-webhook
+              secretName: alertmanager-discord
+              mountPath: /etc/alertmanager/secrets
+              readOnly: true
+          # infra/monitoring/grafana/config/alertmanager/config.yml 그대로
+          config:
+            global:
+              resolve_timeout: 5m
+            route:
+              receiver: discord
+              group_by: [alertname, severity, service_name, application, job, instance]
+              group_wait: 30s
+              group_interval: 5m
+              repeat_interval: 4h
+              routes:
+                - receiver: drop-local
+                  matchers:
+                    - environment="local"
+                  continue: false
+            receivers:
+              - name: drop-local
+              - name: discord
+                discord_configs:
+                  - send_resolved: true
+                    webhook_url_file: /etc/alertmanager/secrets/discord-webhook
+                    title: '{{ $scope := or (index .CommonLabels "environment") (index .CommonLabels "deployment_environment") (index .CommonLabels "service_name") (index .CommonLabels "application") (index .CommonLabels "job") (index .CommonLabels "instance") "unknown" }}[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}][{{ $scope }}] {{ .CommonLabels.alertname }}'
+                    message: |
+                      {{ range .Alerts }}
+                      {{ $scope := or (index .Labels "environment") (index .Labels "deployment_environment") (index .Labels "service_name") (index .Labels "application") (index .Labels "job") "unknown" }}
+                      {{ $target := or (index .Labels "instance") (index .Labels "pod") (index .Labels "name") "-" }}
+                      • {{ .Annotations.summary }}
+                        환경: {{ $scope }}
+                        severity: {{ .Labels.severity }}
+                        대상: {{ $target }}{{ if index .Labels "pool" }}
+                        pool: {{ index .Labels "pool" }}{{ end }}{{ if index .Labels "uri" }}
+                        route: {{ index .Labels "method" }} {{ index .Labels "uri" }}{{ end }}{{ if .Annotations.description }}
+                        설명: {{ .Annotations.description }}{{ end }}
+                      {{ end }}
+            inhibit_rules:
+              - source_matchers: ['severity="critical"']
+                target_matchers: ['severity="warning"']
+                equal: [alertname, service_name, application, job, instance]
+        prometheus-node-exporter:
+          enabled: true
+          fullnameOverride: node-exporter # extraScrapeConfigs의 타깃 이름과 일치
+          image:
+            tag: v1.11.1 # compose와 동일
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { memory: 64Mi }
+        kube-state-metrics:
+          enabled: false # 현재 대시보드가 안 씀
+        prometheus-pushgateway:
+          enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - CreateNamespace=true

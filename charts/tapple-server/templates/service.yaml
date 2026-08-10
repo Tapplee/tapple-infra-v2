@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tapple-server.fullname" . }}
+  labels:
+    {{- include "tapple-server.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "tapple-server.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+    # management(9090)는 의도적으로 미노출 — Prometheus는 파드 어노테이션으로 직접 스크레이프

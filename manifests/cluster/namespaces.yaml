@@ -1,0 +1,28 @@
+# 네임스페이스 명시 생성 (wave -3)
+# ArgoCD의 CreateNamespace=true는 Application의 destination 하나만 만든다.
+# secrets Application 하나가 여러 네임스페이스에 SealedSecret을 뿌리므로,
+# 그 전에 네임스페이스가 전부 존재해야 한다 (없으면 sync 실패 → 뒤 wave 정지).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: db
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev-app
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev-db

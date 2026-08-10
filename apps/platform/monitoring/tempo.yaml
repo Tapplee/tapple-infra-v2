@@ -1,0 +1,52 @@
+# Tempo — 기존 compose 스택(infra/monitoring tempo.yml)의 k8s 이식판
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tempo
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: tempo
+    # TODO(Phase 6): 설치 시점 최신 안정 차트 버전 고정
+    targetRevision: 1.18.0
+    helm:
+      valuesObject:
+        fullnameOverride: tempo
+        tempo:
+          repository: grafana/tempo
+          tag: 2.10.5 # compose와 동일
+          reportingEnabled: false
+          retention: 168h # 로컬 tempo.yml block_retention 그대로 (7d)
+          receivers:
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:4317
+                http:
+                  endpoint: 0.0.0.0:4318
+          # 로컬 튜닝 유지 — 디버깅 시 trace를 빨리 검색 가능하게
+          ingester:
+            trace_idle_period: 10s
+            max_block_duration: 5m
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { memory: 768Mi }
+        persistence:
+          enabled: true
+          storageClassName: local-path
+          size: 5Gi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - CreateNamespace=true

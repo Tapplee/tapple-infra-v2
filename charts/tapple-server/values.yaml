@@ -1,0 +1,96 @@
+# tapple-server 차트 기본값 — 단일 환경(prod)이라 이 파일 하나만 사용
+# CI(Phase 8)는 image.tag 한 줄만 bump한다
+
+replicaCount: 1 # 단일 노드 — 늘리려면 노드 리사이즈 먼저
+
+# 축출 순서: dev-low < (기본) < app-important < db-critical (manifests/cluster/priorityclasses.yaml)
+priorityClassName: app-important
+
+image:
+  repository: ghcr.io/tapplee/tapple-be
+  # 커밋 SHA 태그. 비우면 배포 실패하도록 required 처리 (mutable :latest 금지)
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# ghcr private pull용 시크릿 (secrets/ghcr-pull.yaml, app 네임스페이스)
+imagePullSecrets:
+  - name: ghcr-pull
+
+ports:
+  # taple-be는 actuator를 앱 포트와 같이 쓴다 (management.server.port 미설정) — 별도 관리 포트 없음
+  http: 8080
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: traefik # k3s 내장 Traefik
+  # 임시 VPS 테스트용 — nip.io는 <ip>.nip.io를 그 IP로 해석해주는 공용 와일드카드 DNS.
+  # TODO: iwinv 컷오버 시 실도메인으로 이 한 줄만 교체 (api.taple.co.kr 등)
+  host: api.141.164.40.139.nip.io
+  # Cloudflare origin cert 시크릿 (실도메인 붙일 때 생성)
+  tls: []
+  # - secretName: cloudflare-origin-cert
+  #   hosts: [api.example.com]
+
+# 계획 §4-2 — Burstable (8 vCPU / 32GB 노드 기준)
+# JVM은 -XX:MaxRAMPercentage=75 → limits 6Gi면 힙 ~4.5Gi
+# limits.cpu 3000m: Tomcat 200 스레드가 순간 몰릴 때 쓸 여지 (평상시엔 requests만 점유)
+resources:
+  requests:
+    cpu: 1000m
+    memory: 4Gi
+  limits:
+    cpu: 3000m
+    memory: 6Gi
+
+# 평문 OK인 환경변수만. 자격증명은 전부 existingSecret으로
+env:
+  # otel을 더해야 OTLP push가 켜진다 (taple-be application-otel.yml)
+  # TODO(컷오버): prod 프로파일은 logback에 AwsLogsAppender(CloudWatch)를 물린다 —
+  #   AWS 떠난 뒤엔 BE에서 그 appender를 빼거나 k3s 전용 프로파일을 만들 것
+  SPRING_PROFILES_ACTIVE: prod,otel
+  # v1 대시보드가 service_name="taple"로 필터하므로 환경 접두어를 붙이지 않는다.
+  # 환경 구분은 아래 DEPLOY_ENV → deployment_environment 라벨로 한다
+  SPRING_APPLICATION_NAME: taple
+  DEPLOY_ENV: prod
+  POSTGRES_URL: jdbc:postgresql://postgres.db.svc.cluster.local:5432/taple_prod # docker-compose-prod와 동일 DB명
+  # OTLP 게이트웨이 — 메트릭·트레이스·로그 전부 여기로 push (scrape 아님)
+  OTEL_URL: http://otel-collector.monitoring.svc.cluster.local:4318
+
+# POSTGRES_USERNAME / POSTGRES_PASSWORD / JWT_SECRET_KEY / OTEL_AUTH_HEADER 등 (secrets/app-secrets.yaml)
+existingSecret: app-secrets
+
+probes:
+  # Spring Boot가 k8s 감지 시 liveness/readiness 그룹 자동 활성화
+  startup:
+    path: /actuator/health/liveness
+    failureThreshold: 30 # 저CPU(500m) 기동 대비 최대 150s 허용
+    periodSeconds: 5
+  liveness:
+    path: /actuator/health/liveness
+    periodSeconds: 10
+  readiness:
+    path: /actuator/health/readiness
+    periodSeconds: 10
+
+# Dockerfile의 spring 유저 (eclipse-temurin alpine에서 실측: uid 100 / gid 101)
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  runAsGroup: 101
+  fsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true # 쓰기 경로는 /tmp, /app/logs emptyDir로
+  capabilities:
+    drop: ["ALL"]
+
+# taple-be는 메트릭을 OTLP로 push한다(micrometer-registry-otlp) — Prometheus 스크레이프 대상이 아니다.
+# 그래서 prometheus.io/scrape 애노테이션을 붙이지 않는다.
+podAnnotations: {}
