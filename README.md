@@ -54,7 +54,16 @@ python3 scripts/gen-configmaps.py                        # 기본값: ../tapple-
 python3 scripts/gen-configmaps.py /다른/경로/config       # 원본 위치가 다르면
 ```
 
-대시보드는 `service_name="taple"`로 필터하므로 차트 values의 `SPRING_APPLICATION_NAME`을 `taple`로 고정해뒀다. 환경 구분은 `DEPLOY_ENV`(→ `deployment_environment` 라벨)로 한다.
+대시보드의 `Service` 드롭다운은 하드코딩이 아니라 **쿼리 변수**(`label_values(service_name)`)다. 그래서 환경마다 이름을 다르게 두면 드롭다운에서 골라 볼 수 있다 — prod `taple`, dev `taple-dev`. 같은 이름을 쓰면 두 환경 지표가 한 그래프에 섞인다.
+
+이 값(`SPRING_APPLICATION_NAME`)은 Prometheus 의 `application` 라벨과 Loki·Tempo 의 `service_name` 에 동시에 반영된다. `DEPLOY_ENV`(→ `deployment_environment`)는 alertmanager 알림 제목이 우선 참조하는 라벨이라 함께 유지한다.
+
+| 신호 | prod / dev 구분 |
+|---|---|
+| 대시보드 | `Service` 드롭다운 (`taple` / `taple-dev`) |
+| Prometheus 알림 | 필터 없이 `sum by (application, service_name)` — 앱별로 따로 발생 |
+| 알림 제목 | `deployment_environment` = prod / dev |
+| Loki 로그 알림 | **prod 만** — 규칙이 `{service_name="taple"}` 하드코딩. dev 가 알림을 보내지 않는 건 의도된 동작 |
 
 ## 환경 (prod / dev)
 
@@ -127,6 +136,7 @@ helm lint charts/tapple-server --set image.tag=test
 - [ ] Traefik `trustedIPs`(Cloudflare 대역) — 없으면 로그·레이트리밋에 실 사용자 IP 대신 Cloudflare IP가 찍힘
 - [ ] ghcr retention — 오래된 이미지 자동 삭제 (최근 N개 + 배포 중 태그는 보존)
 - [ ] 매니페스트 lint CI (helm template·kubeconform)
+- [ ] 대시보드의 AWS 잔재 정리 — `AWS Region`·`RDS Instance` 변수와 그 패널들이 CloudWatch 데이터소스를 요구한다. k3s 에는 Prometheus·Loki·Tempo·Alertmanager 4종만 프로비저닝돼 있어 해당 패널은 에러로 뜬다 (원본은 v1 소유)
 - [ ] 팀원 kubeconfig 발급 — [docs/db-access.md](docs/db-access.md) §6 (토큰 기본 90일, 만료 시 재발급)
 - [ ] BE의 `prod` 프로파일에서 CloudWatch appender 제거 또는 k3s 전용 프로파일 — AWS 떠난 뒤엔 무의미
 - [x] 시크릿 7종 씰링 (`secrets/`) — 부팅 필수값만 실값, 나머지 더미

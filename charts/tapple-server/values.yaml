@@ -52,8 +52,9 @@ env:
   # TODO(컷오버): prod 프로파일은 logback에 AwsLogsAppender(CloudWatch)를 물린다 —
   #   AWS 떠난 뒤엔 BE에서 그 appender를 빼거나 k3s 전용 프로파일을 만들 것
   SPRING_PROFILES_ACTIVE: prod,otel
-  # v1 대시보드가 service_name="taple"로 필터하므로 환경 접두어를 붙이지 않는다.
-  # 환경 구분은 아래 DEPLOY_ENV → deployment_environment 라벨로 한다
+  # 대시보드·알림이 이 값을 그대로 쓴다 (Prometheus 의 application 라벨, Loki·Tempo 의 service_name).
+  # prod 는 taple, dev 는 taple-dev — 대시보드 Service 드롭다운에서 골라 본다.
+  # Loki 로그 알림 규칙이 {service_name="taple"} 로 하드코딩돼 있어 이 값을 바꾸면 그 알림이 죽는다.
   SPRING_APPLICATION_NAME: taple
   DEPLOY_ENV: prod
   # DB명은 홈서버 .env 실측값(tapple)에 맞춤.

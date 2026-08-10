@@ -23,8 +23,11 @@ priorityClassName: dev-low
 
 env:
   SPRING_PROFILES_ACTIVE: dev,otel
-  # service_name은 prod와 같게 두고(대시보드 필터가 taple 고정), 환경은 DEPLOY_ENV로 구분
-  SPRING_APPLICATION_NAME: taple
+  # 대시보드의 Service 드롭다운은 label_values(service_name) 쿼리 변수라, 이름을 다르게 두면
+  # taple / taple-dev 가 각각 선택 가능해진다. prod 와 같은 이름을 쓰면 두 환경 지표가 한 그래프에 섞인다.
+  # 이 값은 Prometheus 의 application 라벨과 Loki·Tempo 의 service_name 에 동시에 반영된다.
+  # 참고: Loki 로그 알림 규칙은 {service_name="taple"} 로 하드코딩돼 있어 dev 는 로그 알림이 뜨지 않는다(의도).
+  SPRING_APPLICATION_NAME: taple-dev
   DEPLOY_ENV: dev
   POSTGRES_URL: jdbc:postgresql://postgres.dev-db.svc.cluster.local:5432/tapple_dev
   # 관측 스택은 prod와 공유 — deployment_environment=dev 라벨로 구분해서 본다
