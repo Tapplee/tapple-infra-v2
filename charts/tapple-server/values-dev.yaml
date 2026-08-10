@@ -2,7 +2,7 @@
 # CI: develop 브랜치 머지 시 Actions가 이 파일의 image.tag만 bump
 
 image:
-  tag: ""
+  tag: "ec7707ad9d86"
 
 ingress:
   enabled: true
