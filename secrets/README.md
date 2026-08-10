@@ -3,7 +3,11 @@
 이 디렉터리에는 **kubeseal로 암호화된 SealedSecret yaml만** 둔다.
 평문 `kind: Secret` yaml은 절대 커밋 금지.
 
-암호화는 클러스터의 공개키로 하므로 **클러스터 + sealed-secrets 컨트롤러가 뜬 뒤**(Phase 3~4)에야 생성 가능. 그래서 지금은 비어 있다.
+예외로 `sealed-secrets-pub.pem`(컨트롤러 **공개키**)이 함께 있다. 암호화 전용 키라 공개돼도 무해하고 — 그게 공개키의 존재 이유다 — 복호화는 클러스터 안 개인키만 할 수 있다. 이걸 커밋해둔 덕분에 GitHub Actions가 **클러스터 접속 없이** 씰링할 수 있다(아래 "레포에서 씰링하기"). ArgoCD 는 디렉터리에서 yaml 만 읽으므로 이 파일은 무시된다.
+
+> SealedSecret 은 기본적으로 **(네임스페이스, 이름)에 묶여** 암호화된다. 파일의 `namespace:` 를 손으로 바꿔 다른 네임스페이스로 옮기면 컨트롤러가 복호화를 거부한다. 그래서 `app`·`dev-app` 처럼 네임스페이스가 다르면 각각 따로 씰링해야 한다(실측 확인됨).
+
+암호화는 클러스터의 공개키로 한다. 공개키를 이 디렉터리에 커밋해뒀으므로 **클러스터 접속 없이도** 씰링할 수 있다(아래 워크플로). 새 클러스터를 만들었다면 그 클러스터의 공개키로 `sealed-secrets-pub.pem` 을 갱신해야 한다.
 
 ## 만들어야 할 시크릿 목록
 
@@ -65,7 +69,21 @@ HIBERNATE_SHOW_SQL  OTEL_TRACE_SAMPLE  OTEL_AUTH_HEADER
 
 컷오버 전에 AWS 키·Google 시크릿·JWT 키를 로테이션하고, 그때 실값으로 다시 씰링한다.
 
-## 생성 방법 (Phase 3~4)
+## 레포에서 씰링하기 (권장 — SSH 불필요)
+
+`.github/workflows/seal-secret.yml` 이 커밋된 공개키로 씰링해 이 디렉터리에 커밋한다.
+
+1. 이 레포 `Settings → Secrets and variables → Actions` 에 평문을 등록
+2. `Actions → Seal secrets → Run workflow` → 대상 선택
+3. 봇이 `secrets/*.yaml` 을 갱신 커밋 → ArgoCD 가 반영
+
+| 대상 | 필요한 Actions 시크릿 |
+|---|---|
+| `ghcr-pull` | `GHCR_USERNAME`, `GHCR_PAT` (classic PAT, `read:packages`) |
+
+`workflow_dispatch` 입력값은 실행 기록에 평문으로 남으므로 **평문을 입력창으로 넘기지 않는다** — 반드시 Actions 시크릿에 넣는다.
+
+## 생성 방법 — 노드에서 직접 (대안)
 
 ```bash
 # 1) 평문 Secret을 파일로 생성 (클러스터에 apply 하지 않는다. --dry-run 주의)
