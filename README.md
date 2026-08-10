@@ -33,6 +33,7 @@ secrets/                    kubeseal로 암호화된 SealedSecret만 (평문 금
 infra/                      노드 부트스트랩 셸 스크립트 (Phase 1~2)
 scripts/gen-configmaps.py   v1의 대시보드·규칙 원본 → ConfigMap 변환
 runbooks/                   재해 복구 절차
+docs/db-access.md           팀원 DB 접속 가이드 (port-forward + 최소권한 RBAC)
 ```
 
 ## 동작 원리 (한 줄씩)
@@ -121,6 +122,7 @@ helm lint charts/tapple-server --set image.tag=test
 - [ ] Traefik `trustedIPs`(Cloudflare 대역) — 없으면 로그·레이트리밋에 실 사용자 IP 대신 Cloudflare IP가 찍힘
 - [ ] ghcr retention — 오래된 이미지 자동 삭제 (최근 N개 + 배포 중 태그는 보존)
 - [ ] 매니페스트 lint CI (helm template·kubeconform)
+- [ ] 팀원 kubeconfig 발급 — [docs/db-access.md](docs/db-access.md) §6 (토큰 기본 90일, 만료 시 재발급)
 - [ ] BE의 `prod` 프로파일에서 CloudWatch appender 제거 또는 k3s 전용 프로파일 — AWS 떠난 뒤엔 무의미
 - [x] DB명(`tapple`)·Hikari 풀(10) ↔ `max_connections=60` 매칭
 - [x] 알림 채널 — Discord webhook, 기존 alertmanager 라우팅 그대로

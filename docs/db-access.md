@@ -155,7 +155,11 @@ kubectl delete sa teammate -n team-access
 
 **권한 범위 변경** — `manifests/cluster/team-access.yaml`을 고쳐 커밋한다. ArgoCD가 반영한다. `kubectl edit`로 직접 고치면 selfHeal이 되돌린다.
 
-**prod 읽기전용 계정** — `manifests/postgres/readonly-role-job.yaml`이 PostSync 훅으로 만든다. 비밀번호는 `postgres-readonly` SealedSecret에 있고 이렇게 꺼낸다:
+**prod 읽기전용 계정** — `manifests/postgres/readonly-role-job.yaml`(추적 Job)이 만든다. `\gexec`로 idempotent하니 몇 번 돌아도 같고, 비밀번호는 매번 시크릿 값으로 동기화된다.
+
+> PostSync 훅으로도 만들어봤지만 이 클러스터에서 실행되지 않았다 — 컨트롤러가 매 sync 계획에는 `PostSync/0 hook batch/Job:db/postgres-readonly-role`로 넣으면서 실행 단계에서 `skipHooks:true`로 건너뛴다. 그래서 평범한 Job으로 되돌렸고, 그 경로는 롤을 완전히 지운 상태에서 재생성까지 실측했다.
+
+비밀번호는 `postgres-readonly` SealedSecret에 있고 이렇게 꺼낸다:
 ```bash
 kubectl get secret postgres-readonly -n db -o jsonpath='{.data.RO_PASSWORD}' | base64 -d; echo
 ```
@@ -163,7 +167,29 @@ kubectl get secret postgres-readonly -n db -o jsonpath='{.data.RO_PASSWORD}' | b
 
 **권한 확인**
 ```bash
-kubectl auth can-i --as=system:serviceaccount:team-access:teammate create pods/portforward -n dev-db   # yes
-kubectl auth can-i --as=system:serviceaccount:team-access:teammate delete pods -n db                   # no
-kubectl auth can-i --as=system:serviceaccount:team-access:teammate get secrets -n db                   # no
+SA=system:serviceaccount:team-access:teammate
+
+# 서브리소스는 --subresource 로 물어야 한다.
+# kubectl 1.36 에서 `create pods/portforward` 슬래시 형태는 권한이 있어도 no 로 답한다 — 함정.
+kubectl auth can-i --as=$SA create pods --subresource=portforward -n dev-db   # yes
+kubectl auth can-i --as=$SA get pods -n dev-db                                # yes
+kubectl auth can-i --as=$SA get secret/postgres-secrets -n dev-db             # yes
+
+kubectl auth can-i --as=$SA delete pods -n db                                 # no
+kubectl auth can-i --as=$SA create pods --subresource=exec -n db              # no
+kubectl auth can-i --as=$SA get secrets -n db                                 # no
+kubectl auth can-i --as=$SA list secrets -n dev-db                            # no (get 만 줬다)
+kubectl auth can-i --as=$SA get pods -n argocd                                # no
 ```
+
+**실측 기록 (2026-08-10)** — 위 절차를 처음부터 끝까지 밟아 확인한 결과:
+
+| 검증 | 결과 |
+|---|---|
+| 발급된 kubeconfig 로 `kubectl get pods -n dev-db` | 성공 |
+| `port-forward` 후 dev DB 접속 (`tapple`/`tapple_dev`) | 성공 |
+| prod 시크릿 읽기 | `Forbidden` (의도대로 차단) |
+| `tapple_ro` 로 쓰기 시도 | 거부 |
+| 롤을 완전히 지운 뒤 ArgoCD sync | Job 이 자동 재생성 |
+
+`tapple_ro`의 `GRANT SELECT ON ALL TABLES`는 **현재 테이블이 0개라 아무것도 안 잡았다** — 앱이 아직 배포되지 않아 Flyway가 안 돌았기 때문이다. 대신 `ALTER DEFAULT PRIVILEGES`가 등록돼 있어(`pg_default_acl`에 `tapple_ro=r/tapple`) Flyway가 만드는 테이블은 **자동으로** SELECT가 붙는다. 앱 배포 후 별도 GRANT 작업이 필요하지 않다.
