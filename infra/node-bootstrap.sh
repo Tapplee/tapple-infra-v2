@@ -21,7 +21,20 @@ ufw allow 80/tcp
 ufw allow 443/tcp
 ufw --force enable
 
-# TODO(Phase 1): 비루트 배포 사용자 생성 + SSH 하드닝(키 전용, PasswordAuthentication no)
+# SSH 하드닝 — 키 전용
+# 주의: cloud-init 이 /etc/ssh/sshd_config.d/50-cloud-init.conf 에 PasswordAuthentication yes 를 박아둔다.
+# sshd 는 "먼저 나온 값이 이긴다"라서 99-*.conf 로 덮으면 밀린다 — 그 파일을 직접 고치고 00- 으로 앞당긴다.
+sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config.d/50-cloud-init.conf 2>/dev/null || true
+cat > /etc/ssh/sshd_config.d/00-hardening.conf <<'CONF'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+CONF
+echo "ssh_pwauth: false" > /etc/cloud/cloud.cfg.d/99-disable-pwauth.cfg   # 재부팅 때 되돌아가지 않게
+sshd -t && systemctl reload ssh
+sshd -T | grep -E '^(passwordauthentication|permitrootlogin)'
+
+# TODO(Phase 1): 비루트 배포 사용자 생성
 
 echo "node-bootstrap 완료. ufw status:"
 ufw status verbose

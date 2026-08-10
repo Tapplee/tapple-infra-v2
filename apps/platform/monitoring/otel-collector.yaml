@@ -15,7 +15,7 @@ spec:
     repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts
     chart: opentelemetry-collector
     # TODO(Phase 6): 설치 시점 helm search로 최신 안정 버전 고정
-    targetRevision: 0.110.0
+    targetRevision: 0.156.2
     helm:
       valuesObject:
         fullnameOverride: otel-collector
