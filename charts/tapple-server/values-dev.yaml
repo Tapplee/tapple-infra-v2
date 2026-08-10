@@ -26,7 +26,7 @@ env:
   # service_name은 prod와 같게 두고(대시보드 필터가 taple 고정), 환경은 DEPLOY_ENV로 구분
   SPRING_APPLICATION_NAME: taple
   DEPLOY_ENV: dev
-  POSTGRES_URL: jdbc:postgresql://postgres.dev-db.svc.cluster.local:5432/taple_dev
+  POSTGRES_URL: jdbc:postgresql://postgres.dev-db.svc.cluster.local:5432/tapple_dev
   # 관측 스택은 prod와 공유 — deployment_environment=dev 라벨로 구분해서 본다
   OTEL_URL: http://otel-collector.monitoring.svc.cluster.local:4318
 

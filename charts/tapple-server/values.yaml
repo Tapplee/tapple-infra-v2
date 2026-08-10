@@ -56,7 +56,10 @@ env:
   # 환경 구분은 아래 DEPLOY_ENV → deployment_environment 라벨로 한다
   SPRING_APPLICATION_NAME: taple
   DEPLOY_ENV: prod
-  POSTGRES_URL: jdbc:postgresql://postgres.db.svc.cluster.local:5432/taple_prod # docker-compose-prod와 동일 DB명
+  # DB명은 홈서버 .env 실측값(tapple)에 맞춤.
+  # docker-compose-prod.yml 에는 taple_prod, application.yml 기본값은 taple 로 적혀 있지만
+  # 실제 구동에 쓰이는 값은 .env 의 tapple 이다 — pg_dump/restore 가 이 이름을 따라간다
+  POSTGRES_URL: jdbc:postgresql://postgres.db.svc.cluster.local:5432/tapple
   # OTLP 게이트웨이 — 메트릭·트레이스·로그 전부 여기로 push (scrape 아님)
   OTEL_URL: http://otel-collector.monitoring.svc.cluster.local:4318
 

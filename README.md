@@ -65,7 +65,7 @@ python3 scripts/gen-configmaps.py /다른/경로/config       # 원본 위치가
 | 앱 리소스 (req / lim) | 4Gi·1000m / 6Gi·3000m | 2Gi·250m / 3Gi·1500m |
 | DB 리소스 | **8Gi · 2000m Guaranteed** | 2Gi · 250m |
 | PriorityClass | `app-important` / `db-critical` | `dev-low` (**압박 시 가장 먼저 축출**) |
-| DB명 | `taple_prod` | `taple_dev` |
+| DB명 | `tapple` | `tapple_dev` |
 | 백업 | pg_dump CronJob | 없음 (빈 DB + Flyway) |
 | 관측 | 공유 스택 — `deployment_environment=prod` | 공유 스택 — `deployment_environment=dev` |
 | 트리거 브랜치 | `main` → `values.yaml` | `develop` → `values-dev.yaml` |
@@ -122,6 +122,6 @@ helm lint charts/tapple-server --set image.tag=test
 - [ ] ghcr retention — 오래된 이미지 자동 삭제 (최근 N개 + 배포 중 태그는 보존)
 - [ ] 매니페스트 lint CI (helm template·kubeconform)
 - [ ] BE의 `prod` 프로파일에서 CloudWatch appender 제거 또는 k3s 전용 프로파일 — AWS 떠난 뒤엔 무의미
-- [x] DB명(`taple_prod`)·Hikari 풀(10) ↔ `max_connections=60` 매칭
+- [x] DB명(`tapple`)·Hikari 풀(10) ↔ `max_connections=60` 매칭
 - [x] 알림 채널 — Discord webhook, 기존 alertmanager 라우팅 그대로
 - [x] 모니터링 원본/산출물 경계 — 원본은 v1 유지, 여기는 산출물만
