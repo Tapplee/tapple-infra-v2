@@ -1,6 +1,10 @@
 # tapple-server 차트 기본값 — 단일 환경(prod)이라 이 파일 하나만 사용
 # CI(Phase 8)는 image.tag 한 줄만 bump한다
 
+# prod 는 접두어 없는 app·db 네임스페이스를 쓴다. 그 사실이 이름만으로는 드러나지 않아
+# 리소스 라벨로 명시한다 (values-dev.yaml 이 dev 로 덮는다)
+environment: prod
+
 replicaCount: 1 # 단일 노드 — 늘리려면 노드 리사이즈 먼저
 
 # 축출 순서: dev-low < (기본) < app-important < db-critical (manifests/cluster/priorityclasses.yaml)

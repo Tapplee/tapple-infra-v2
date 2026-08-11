@@ -5,6 +5,7 @@ metadata:
   labels:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/component: database
+    environment: prod
 spec:
   serviceName: postgres-headless
   replicas: 1 # 단일 노드 — 복제 없음, 백업이 유일한 복구선 (D14)

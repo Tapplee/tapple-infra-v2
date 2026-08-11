@@ -1,6 +1,8 @@
 # dev 환경 오버라이드 — values.yaml 위에 덮어씀 (여기 없는 값은 prod와 동일)
 # CI: develop 브랜치 머지 시 Actions가 이 파일의 image.tag만 bump
 
+environment: dev
+
 image:
   tag: "c4acadff7a1d"
 

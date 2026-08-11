@@ -11,6 +11,7 @@ metadata:
   labels:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/component: database
+    environment: dev
 spec:
   serviceName: postgres-headless
   replicas: 1

@@ -11,6 +11,15 @@
 default_namespace: default
 
 clusters:
+  # environment 라벨로 박스를 하나 그린다 — prod 가 "접두어 없는 것"이라는 암묵적 규칙만으로
+  # 표현되면 그림을 보는 사람이 prod 를 찾을 수 없다. 네임스페이스가 최상위 박스라
+  # app+db 를 한 박스로 묶지는 못하지만, 각 네임스페이스 안에 환경이 표기된다.
+  - label: environment
+    title: "환경: {}"
+    recommended: true
+    graph_attr:
+      bgcolor: "#FDF0F0"
+
   - label: app.kubernetes.io/instance
     title: "K8s Instance: {}"
     recommended: false
