@@ -296,7 +296,7 @@ tapple-be/.github/workflows/cd-gitops.yml  # build → ghcr.io → 이 레포 im
 
 ---
 
-## 11. PR 프리뷰 환경 (제안 · 미구현)
+## 11. PR 프리뷰 환경 (구현됨 · 시크릿 대기)
 
 `feat/new-func` 같은 브랜치를 올리면 그 PR 만의 URL 이 생기고, PR 을 닫으면 사라지는 환경.
 dev 환경 하나를 여러 작업이 번갈아 쓰면서 서로 덮어쓰는 문제를 없앤다.
@@ -338,19 +338,41 @@ database 를 나누지 않으면 여러 PR 의 Flyway 가 같은 스키마를 �
 | PR 당 | 1 Gi (앱만, prod 의 1/4) |
 | **동시 PR 최대** | **약 8개** — 여유 2Gi 를 남기면 **6개 권장** |
 
-### 만들어야 할 것
+### 구현 상태
 
-- [ ] **`applicationsets.argoproj.io` CRD** — 지금 클러스터에 **없다**. 첫 ArgoCD 설치가
-      애노테이션 크기 오류로 실패했을 때 이것만 안 들어왔다. 컨트롤러는 1/1 Running 인데
-      감시할 CRD 가 없어 헛돌고 있다. 프리뷰와 무관하게 고칠 값어치가 있다
-- [ ] `applicationset-preview.yaml` — PR 생성기 + PR 목록 조회용 GitHub 토큰(tapple-be 가 private)
-- [ ] `cd-gitops.yml` 확장 — 현재 `main`·`dev` 만 빌드한다. 기능 브랜치도 이미지를 만들어야 한다
-      (인프라 레포 태그 커밋은 필요 없다 — ApplicationSet 이 PR head SHA 를 직접 읽는다)
-- [ ] `manifests/postgres-preview/` — 공유 postgres 1대 (튜닝값 축소, 백업 없음)
-- [ ] `createdb` Job — 멱등 `CREATE DATABASE tapple_pr<N>`
-- [ ] `preview-lowest` PriorityClass
-- [ ] 정리 경로 — PR 이 닫히면 Application 은 사라지지만 **database 는 남는다**. 주기적으로
-      지우는 CronJob 이나 PR 닫힘 훅이 필요하다
+- [x] **`applicationsets.argoproj.io` CRD** — 누락돼 있던 것을 설치했다. 첫 ArgoCD 설치가
+      애노테이션 크기 오류로 실패했을 때 이것만 안 들어왔고 컨트롤러가 감시 대상 없이 헛돌았다
+- [x] `apps/preview/applicationset.yaml` — PR 생성기 + `preview` 라벨 필터
+- [x] `apps/preview/postgres.yaml` + `manifests/postgres-preview/` — 공유 postgres 1대
+- [x] `createdb` Job — 차트에 `createDatabase.enabled` 로 게이트, `\gexec` 로 멱등
+- [x] `preview-lowest` PriorityClass (-1000) + `preview` 네임스페이스
+- [x] `charts/tapple-server/values-preview.yaml` + `fullnameOverride` 지원
+- [x] 고아 database 정리 CronJob (주 1회, 마지막 접속 7일 초과 대상)
+- [x] `cd-gitops.yml` 확장 — tapple-be PR #25
+- [ ] **`preview-github-token` 시크릿** (argocd 네임스페이스) — PR 목록 조회용 PAT
+- [ ] **preview 네임스페이스 시크릿 3종** — `app-secrets` · `ghcr-pull` · `postgres-preview-secrets`
+- [ ] **`preview` 라벨 생성** — 레포 라벨 목록에 없으면 붙일 수 없다
+
+### 쓰는 방법
+
+```
+1. PR 을 연다
+2. `preview` 라벨을 붙인다        ← 이게 자리 예약이다
+3. 몇 분 뒤 pr-<번호>.api.<ip>.nip.io 가 뜬다
+4. PR 을 닫거나 라벨을 떼면 사라진다
+```
+
+### 밟기 쉬운 함정 (구현 중 실제로 밟은 것들)
+
+- **PR 생성기의 라벨 필터는 `github.labels` 에 있다.** `filters[]` 는 `branchMatch`·
+  `targetBranchMatch`·`titleMatch` 만 받는다. `filters[].labels` 로 쓰면 admission 이
+  unknown field 로 거부한다 (CRD 스키마로 확인)
+- **PR 이벤트의 기본 체크아웃은 머지 커밋이다.** 그대로 빌드하면 이미지 태그가 머지 커밋
+  SHA 가 되는데 ApplicationSet 은 `head_sha` 를 본다 → 찾는 이미지가 없다
+- **차트의 `fullname` 을 `.Release.Name` 으로 바꾸면 안 된다.** prod 는 그대로지만
+  dev 리소스 이름이 바뀌어 기존 워크로드가 재생성된다. `fullnameOverride` 를 추가해
+  프리뷰만 덮어쓴다
+- **PR 이 닫혀도 database 는 남는다.** ApplicationSet 이 지우는 것은 k8s 리소스뿐이다
 
 ### 할 값어치가 있나
 

@@ -1,4 +1,4 @@
-"""PR 프리뷰 환경 — feat 브랜치마다 임시 환경을 띄운다. (제안, 미구현)
+"""PR 프리뷰 환경 — feat 브랜치마다 임시 환경을 띄운다.
 
 목표: PR 을 올리면 그 브랜치만의 URL 이 생기고, PR 을 닫으면 사라진다.
       dev 환경 하나를 여러 작업이 번갈아 쓰면서 서로 덮어쓰는 문제를 없앤다.
@@ -35,7 +35,7 @@ from diagrams.onprem.vcs import Github
 
 from theme import THEMES, cluster_attr, edge_attr, graph_attr, node_attr
 
-NEW = "#D68910"    # 새로 만들어야 하는 것
+NEW = "#D68910"    # 사람 손이 필요한 지점
 AUTO = "#4C8FD0"   # 자동
 GONE = "#8B95A1"   # PR 닫힐 때 사라지는 것
 
@@ -43,7 +43,7 @@ GONE = "#8B95A1"   # PR 닫힐 때 사라지는 것
 def build(theme: dict) -> None:
     ca = cluster_attr(theme)
     with Diagram(
-        "PR 프리뷰 환경 (제안 · 미구현) — 주황이 새로 만들어야 하는 부분",
+        "PR 프리뷰 환경 — 주황이 사람 손이 필요한 지점",
         filename=f"out/preview-env{theme['name']}",
         outformat="png",
         show=False,
@@ -55,23 +55,23 @@ def build(theme: dict) -> None:
 
         with Cluster("tapple-be", graph_attr=ca):
             pr = Github("PR #42\nfeat/new-func")
-            cd = GithubActions("cd-gitops.yml\n★ 브랜치 무관 빌드로 확장")
+            cd = GithubActions("cd-gitops.yml\npreview 라벨 PR 빌드")
 
         registry = Docker("ghcr.io/tapplee/tapple-be\n:<PR head SHA>")
 
         with Cluster("tapple-infra-v2", graph_attr=ca):
-            appset = Github("★ applicationset-preview.yaml\nPR 생성기")
+            appset = Github("applicationset.yaml\nPR 생성기")
 
-        argo = Argocd("ArgoCD\n★ ApplicationSet CRD 필요")
+        argo = Argocd("ArgoCD\nApplicationSet")
 
         with Cluster("k3s  ·  ns preview", graph_attr=ca):
             with Cluster("PR 하나당 자동 생성 · 닫으면 삭제", graph_attr=ca):
                 ing = Ingress("pr-42.api.<ip>\n.nip.io")
                 app = Deployment("tapple-server-pr-42\n1Gi · preview-lowest")
-                dbjob = Job("★ createdb Job\ntapple_pr42")
-            pg = StatefulSet("★ postgres-preview\n공유 1대 · 1Gi")
+                dbjob = Job("createdb Job\ntapple_pr42")
+            pg = StatefulSet("postgres-preview\n공유 1대 · 1Gi")
 
-        me >> Edge(label="① PR 올린다", color=NEW, fontcolor=NEW) >> pr
+        me >> Edge(label="① PR + preview 라벨", color=NEW, fontcolor=NEW) >> pr
         pr >> Edge(label="자동 빌드", color=AUTO) >> cd >> Edge(color=AUTO) >> registry
 
         argo >> Edge(label="② PR 목록 폴링\n(GitHub 토큰 필요)", color=NEW,
