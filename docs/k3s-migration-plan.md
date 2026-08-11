@@ -293,3 +293,70 @@ tapple-be/.github/workflows/cd-gitops.yml  # build → ghcr.io → 이 레포 im
 | 관측성 | compose Grafana (리그와 공용) | 클러스터 내 OTel 풀스택 |
 | 가용성 | — | 짧은 다운 허용, RTO ~10분 |
 | 복구 | — | 스크립트 2개 + ArgoCD apply + pg_restore |
+
+---
+
+## 11. PR 프리뷰 환경 (제안 · 미구현)
+
+`feat/new-func` 같은 브랜치를 올리면 그 PR 만의 URL 이 생기고, PR 을 닫으면 사라지는 환경.
+dev 환경 하나를 여러 작업이 번갈아 쓰면서 서로 덮어쓰는 문제를 없앤다.
+
+![PR 프리뷰 환경](diagrams/out/preview-env.png)
+
+### 장치
+
+ArgoCD **ApplicationSet** 의 Pull Request 생성기. PR 목록을 폴링해 PR 하나당 Application 을
+자동 생성하고, PR 이 닫히면 그 Application 을 지운다.
+
+### 설계 판단 세 개
+
+**① 네임스페이스를 PR 마다 만들지 않고 `preview` 하나로 모은다**
+
+SealedSecret 은 (네임스페이스, 이름)에 묶여 암호화된다. PR 마다 네임스페이스를 만들면
+시크릿을 재사용할 수 없고, PR 이 열릴 때마다 사람이 씰링해야 하면 자동화가 성립하지 않는다.
+`cluster-wide` 스코프로 씰링하는 방법도 있지만 그건 그 시크릿을 **아무 네임스페이스에서나**
+풀 수 있게 만드는 것이라, 프리뷰 편의로 감수할 트레이드오프가 아니다.
+
+**② DB 는 프리뷰 전용 postgres 한 대를 공유하고 PR 마다 database 를 나눈다**
+
+database 를 나누지 않으면 여러 PR 의 Flyway 가 같은 스키마를 동시에 고쳐 서로를 깬다.
+반대로 postgres 를 PR 마다 띄우면 메모리가 남지 않는다(아래 예산).
+`CREATE DATABASE` 는 postgres 가 자동으로 해주지 않으므로 멱등 Job 이 필요하다.
+
+**③ 우선순위를 dev 보다 더 낮게 둔다**
+
+메모리 압박 시 프리뷰가 가장 먼저 죽어야 한다. `dev-low`(-100) 아래 `preview-lowest` 를 새로 만든다.
+
+### 메모리 예산 (2026-08-11 실측 기준)
+
+| | |
+|---|---|
+| allocatable | 28.3 Gi |
+| 현재 requests | 18.5 Gi |
+| 여유 | **9.8 Gi** |
+| 프리뷰 공유분 (postgres-preview) | 1 Gi (1회) |
+| PR 당 | 1 Gi (앱만, prod 의 1/4) |
+| **동시 PR 최대** | **약 8개** — 여유 2Gi 를 남기면 **6개 권장** |
+
+### 만들어야 할 것
+
+- [ ] **`applicationsets.argoproj.io` CRD** — 지금 클러스터에 **없다**. 첫 ArgoCD 설치가
+      애노테이션 크기 오류로 실패했을 때 이것만 안 들어왔다. 컨트롤러는 1/1 Running 인데
+      감시할 CRD 가 없어 헛돌고 있다. 프리뷰와 무관하게 고칠 값어치가 있다
+- [ ] `applicationset-preview.yaml` — PR 생성기 + PR 목록 조회용 GitHub 토큰(tapple-be 가 private)
+- [ ] `cd-gitops.yml` 확장 — 현재 `main`·`dev` 만 빌드한다. 기능 브랜치도 이미지를 만들어야 한다
+      (인프라 레포 태그 커밋은 필요 없다 — ApplicationSet 이 PR head SHA 를 직접 읽는다)
+- [ ] `manifests/postgres-preview/` — 공유 postgres 1대 (튜닝값 축소, 백업 없음)
+- [ ] `createdb` Job — 멱등 `CREATE DATABASE tapple_pr<N>`
+- [ ] `preview-lowest` PriorityClass
+- [ ] 정리 경로 — PR 이 닫히면 Application 은 사라지지만 **database 는 남는다**. 주기적으로
+      지우는 CronJob 이나 PR 닫힘 훅이 필요하다
+
+### 할 값어치가 있나
+
+프리뷰 환경의 값어치는 **보는 사람이 여러 명일 때** 가장 크다 — 디자이너·기획이 URL 로 확인하거나,
+FE 가 BE 브랜치를 붙여보거나, 동시 PR 이 여러 개일 때. 지금은 1인이고 `dev` 브랜치가
+그 역할을 하며, 로컬 compose 가 브랜치별 테스트를 담당한다.
+
+즉 **지금 당장 필요한 것은 아니다.** 다만 아픈 지점이 하나 있다 — dev 환경이 하나뿐이라
+두 작업이 겹치면 서로를 덮는다. 그게 실제로 불편해지는 시점이 도입 신호다.
