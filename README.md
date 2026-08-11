@@ -85,16 +85,21 @@ apps/                       ArgoCD Application 정의 — root가 재귀 sync
   dev/
     postgres.yaml             wave 0   → manifests/postgres-dev/    [dev-db]
     tapple-server.yaml        wave 1   → 같은 차트 + values-dev.yaml [dev-app]
+  preview/                    PR 프리뷰 — docs/preview-environments.md
+    postgres.yaml               공유 DB 1대                          [preview]
+    applicationset.yaml         PR 하나당 Application 자동 생성·삭제
 charts/tapple-server/       자작 Helm 차트 (환경 공용) + values.yaml(prod)·values-dev.yaml
 manifests/cluster/          네임스페이스 5개 + PriorityClass 3종
 manifests/postgres/         prod DB — StatefulSet·Service·백업 CronJob
 manifests/postgres-dev/     dev DB — 축소판 (백업 없음, 우선순위 최하)
+manifests/postgres-preview/ 프리뷰 공유 DB + 고아 database 정리 CronJob
 manifests/monitoring/       대시보드 7개 + 알림 규칙 ConfigMap — 전부 gen-configmaps.py 산출물, 직접 고치지 말 것
 secrets/                    kubeseal로 암호화된 SealedSecret만 (평문 금지 — secrets/README.md)
 infra/                      노드 부트스트랩 셸 스크립트 (Phase 1~2)
 scripts/gen-configmaps.py   v1의 대시보드·규칙 원본 → ConfigMap 변환
 runbooks/                   재해 복구 절차
 docs/db-access.md           팀원 DB 접속 가이드 (port-forward + 최소권한 RBAC)
+docs/preview-environments.md  PR 프리뷰 사용법 — 팀원이 먼저 읽을 문서
 ```
 
 ## 동작 원리 (한 줄씩)
@@ -130,16 +135,18 @@ python3 scripts/gen-configmaps.py /다른/경로/config       # 원본 위치가
 
 **클러스터는 하나, 네임스페이스로 분리.** 브랜치로 환경을 나누지 않는다(안티패턴) — 인프라 레포는 항상 `main` 한 브랜치, 환경 차이는 디렉터리와 values 파일로만.
 
-| | prod | dev |
-|---|---|---|
-| 네임스페이스 | `app` · `db` | `dev-app` · `dev-db` |
-| 앱 리소스 (req / lim) | 4Gi·1000m / 6Gi·3000m | 2Gi·250m / 3Gi·1500m |
-| DB 리소스 | **8Gi · 2000m Guaranteed** | 2Gi · 250m |
-| PriorityClass | `app-important` / `db-critical` | `dev-low` (**압박 시 가장 먼저 축출**) |
-| DB명 | `tapple` | `tapple_dev` |
-| 백업 | pg_dump CronJob | 없음 (빈 DB + Flyway) |
-| 관측 | 공유 스택 — `deployment_environment=prod` | 공유 스택 — `deployment_environment=dev` |
-| 트리거 브랜치 | `main` → `values.yaml` | `develop` → `values-dev.yaml` |
+| | prod | dev | PR 프리뷰 |
+|---|---|---|---|
+| 네임스페이스 | `app` · `db` | `dev-app` · `dev-db` | `preview` (전부 한 곳) |
+| 앱 리소스 (req / lim) | 4Gi·1000m / 6Gi·3000m | 2Gi·250m / 3Gi·1500m | 1Gi·200m / 2Gi·1500m |
+| DB | 전용 8Gi Guaranteed | 전용 2Gi | 공유 1대 1Gi, PR 당 database |
+| PriorityClass | `app-important` / `db-critical` | `dev-low` | `preview-lowest` (**가장 먼저 축출**) |
+| DB명 | `tapple` | `tapple_dev` | `tapple_pr<PR번호>` |
+| 백업 | pg_dump CronJob | 없음 | 없음 (7일 미접속 시 database 삭제) |
+| 관측 | `service_name=taple` | `taple-dev` | `taple-pr<번호>` |
+| 트리거 | `main` push | `dev` push | PR 에 `preview` 라벨 |
+
+**동시 프리뷰는 6개까지다.** 노드 여유(9.8Gi)를 PR 당 1Gi 로 나눈 값이고, 7번째는 `Pending` 에서 멈춘다. `preview` 라벨이 곧 자리 예약이라 다 본 PR 은 라벨을 떼야 한다.
 
 ## 리소스 예산 (8 vCPU / 32GB 노드)
 
