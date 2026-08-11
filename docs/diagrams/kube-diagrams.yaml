@@ -1,0 +1,25 @@
+# kube-diagrams 커스텀 설정 — 네임스페이스 박스만 남긴다
+#
+# 기본 설정은 라벨별로 클러스터 박스를 4겹 만든다
+#   K8s Instance(app.kubernetes.io/instance) → Helm Chart(helm.sh/chart)
+#   → K8s Application(app.kubernetes.io/name) → K8s Component(app.kubernetes.io/component)
+# 우리 리소스는 그 라벨을 다 갖고 있어서 박스가 중첩되고 그림이 옆으로 길어진다.
+# 정보량은 늘지 않으므로(리소스 이름에 이미 다 드러난다) 전부 끈다.
+#
+# 이 파일은 기본 설정을 덮어쓰는 게 아니라 병합된다 — 같은 label 키를 다시 선언해
+# recommended: false 로 내린다.
+default_namespace: default
+
+clusters:
+  - label: app.kubernetes.io/instance
+    title: "K8s Instance: {}"
+    recommended: false
+  - label: helm.sh/chart
+    title: "Helm Chart: {}"
+    recommended: false
+  - label: app.kubernetes.io/name
+    title: "K8s Application: {}"
+    recommended: false
+  - label: app.kubernetes.io/component
+    title: "K8s Component: {}"
+    recommended: false

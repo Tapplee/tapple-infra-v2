@@ -8,7 +8,45 @@
 
 **이 레포는 public이다.** SealedSecret 암호문만 커밋하고 평문 시크릿은 절대 올리지 않는다(secret scanning + push protection 켜져 있음). ArgoCD는 public 레포라 자격증명 없이 pull한다 — private로 되돌리면 deploy key 등록이 필요해진다.
 
+## 그림으로 보기
+
+> 2026-08-11 클러스터 스냅샷. 재생성 절차는 [docs/diagrams/README.md](docs/diagrams/README.md).
+
+**아키텍처** — 앱·DB 네임스페이스의 실제 리소스. 라이브 클러스터에서 KubeDiagrams 로 파생시킨 것이라 이 시점의 사실이다.
+
+<picture>
+  <img alt="app·db·dev-app·dev-db 네임스페이스의 Deployment·StatefulSet·Service·Ingress·PVC 구성" src="docs/diagrams/out/architecture-app.png">
+</picture>
+
+모니터링 스택은 [architecture-platform.png](docs/diagrams/out/architecture-platform.png) 로 따로 뽑아뒀다 (grafana·prometheus·loki·tempo·otel-collector).
+
+**트래픽 흐름** — 누가 누구를 부르는가. 파랑이 사용자 요청, 보라가 관측 데이터 push, 빨강이 운영자·팀원 접근이다. 이 연결들은 환경변수 안의 문자열이라 매니페스트에서 파생시킬 수 없어 손으로 그렸다.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"  srcset="docs/diagrams/out/traffic-flow-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/diagrams/out/traffic-flow.png">
+  <img alt="인터넷에서 traefik·ingress·service를 거쳐 앱에 닿고, 앱이 postgres와 otel-collector로 나가는 경로" src="docs/diagrams/out/traffic-flow.png">
+</picture>
+
+**배포 흐름** — 코드 push 부터 클러스터 반영까지. 빨간 화살표의 방향이 이 설계의 핵심이다: **ArgoCD 가 GitHub 을 읽는다(pull).** 앱 레포에서 클러스터로 가는 화살표가 없다.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"  srcset="docs/diagrams/out/cicd-flow-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/diagrams/out/cicd-flow.png">
+  <img alt="push에서 GitHub Actions·ghcr·인프라 레포 태그 커밋을 거쳐 ArgoCD가 pull 배포하는 흐름" src="docs/diagrams/out/cicd-flow.png">
+</picture>
+
+**GitOps 제어 흐름** — 수동 apply 는 `bootstrap/root-app.yaml` 하나뿐이고, 나머지 13개 Application 은 그것이 만든다. 점선이 순서 의존(sync wave)이다.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"  srcset="docs/diagrams/out/gitops-tree-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/diagrams/out/gitops-tree.png">
+  <img alt="root-app 하나가 wave -3부터 2까지 13개 Application을 만드는 구조" src="docs/diagrams/out/gitops-tree.png">
+</picture>
+
 ## 구조
+
+아래 트리는 **항상 맞는 부분**이다. 위 그림은 특정 시점의 스냅샷이고, 이 트리는 레포 구조 자체라 커밋 diff 에 드러나고 검색도 된다.
 
 ```
 bootstrap/root-app.yaml     재구축 시 수동 apply하는 유일한 파일 (app-of-apps 루트)
