@@ -49,6 +49,16 @@ spec:
           args:
             - |
               set -eu
+              # NetworkPolicy 가 새 파드를 허용하기까지 몇 초 걸린다 — 그 전에 붙으면 죽는다.
+              # k3s 의 netpol 구현(kube-router)은 "허용 대상 파드 IP" 를 ipset 으로 관리하는데,
+              # 파드가 뜬 직후에는 아직 그 IP 가 셋에 없다. 그 상태의 패킷은 REJECT 되고
+              # psql 은 "Connection refused" 로 즉사한다(실측: 즉시 실패, 30초 뒤 성공).
+              # 컨테이너가 짧게 살다 죽는 Job 만 이 창에 걸린다. 앱처럼 오래 사는 파드는 재시도로 넘긴다.
+              for i in $(seq 1 40); do
+                pg_isready -q && break
+                echo "postgres 대기 중... ($i/40)"
+                sleep 3
+              done
               # \gexec — SELECT 가 만들어낸 SQL 문자열을 실행한다. 존재 여부에 따라 CREATE/ALTER 가
               # 하나만 걸리므로 몇 번 돌려도 결과가 같다(비밀번호는 매번 시크릿 값으로 동기화된다).
               psql -v ON_ERROR_STOP=1 --set=ro_pw="$RO_PASSWORD" <<'SQL'

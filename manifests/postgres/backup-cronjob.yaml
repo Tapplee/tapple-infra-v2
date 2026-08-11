@@ -34,7 +34,14 @@ spec:
               image: postgres:16 # StatefulSet 이미지와 동일 버전 유지
               command: ["sh", "-c"]
               args:
-                - pg_dump -Fc -f "/backup/taple-$(date +%Y%m%d-%H%M%S).dump" && ls -lh /backup
+                # 대기 루프 이유는 readonly-role-job.yaml 참고 — NetworkPolicy 가 새 파드 IP 를
+                # 허용 목록에 넣기까지 몇 초 걸린다. 지금까지는 이미지 풀 시간이 그 창을 가려줬을 뿐이다.
+                - |
+                  for i in $(seq 1 40); do
+                    pg_isready -q && break
+                    sleep 3
+                  done
+                  pg_dump -Fc -f "/backup/taple-$(date +%Y%m%d-%H%M%S).dump" && ls -lh /backup
               env:
                 - name: PGHOST
                   value: postgres.db.svc.cluster.local
