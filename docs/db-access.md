@@ -4,13 +4,14 @@ k3s 클러스터의 **dev·prod PostgreSQL**에 붙는 방법. 로컬 개발 DB(
 
 > **먼저 알아둘 것**: 두 DB 모두 `ClusterIP`라 인터넷에서 직접 안 보인다. 접속은 `kubectl port-forward`로 터널을 뚫어 **내 컴퓨터의 localhost**를 클러스터 안 DB에 연결하는 방식이다. DBeaver·TablePlus·psql 등 평소 쓰는 도구를 그대로 쓴다.
 
-| | dev | prod |
-|---|---|---|
-| DB명 | `tapple_dev` | `tapple` |
-| 계정 | `tapple` (앱과 같은 계정) | `tapple_ro` (**조회 전용**) |
-| 권한 | 읽기·쓰기·DDL | `SELECT`만 |
-| 비밀번호 | 클러스터에서 직접 꺼낸다 (아래 3단계) | 운영자에게 요청 |
-| 네임스페이스 | `dev-db` | `db` |
+| | dev | prod | PR 프리뷰 |
+|---|---|---|---|
+| DB명 | `tapple_dev` | `tapple` | `tapple_pr<PR번호>` |
+| 계정 | `tapple` (앱과 같은 계정) | `tapple_ro` (**조회 전용**) | `tapple` |
+| 권한 | 읽기·쓰기·DDL | `SELECT`만 | 읽기·쓰기·DDL |
+| 비밀번호 | 클러스터에서 직접 꺼낸다 | 운영자에게 요청 | 클러스터에서 직접 꺼낸다 |
+| 네임스페이스 | `dev-db` | `db` | `preview` |
+| 포트(권장) | 15432 | 15433 | 15434 |
 
 **왜 prod는 조회 전용인가**: 실데이터라 실수 한 번이 백업 복구로 이어진다. prod에 쓰기가 필요한 작업은 마이그레이션(Flyway)으로 올리거나 운영자에게 요청한다.
 
@@ -99,6 +100,44 @@ ERROR:  permission denied for table members
 
 ---
 
+## 3-2. PR 프리뷰 DB 접속
+
+PR 마다 database 가 나뉘고 postgres 인스턴스 한 대를 공유한다. **자기 PR 번호의 database 로 붙는다.**
+
+```bash
+kubectl port-forward -n preview svc/postgres-preview 15434:5432
+```
+
+```bash
+# 비밀번호 (프리뷰 전용으로 생성된 값 — 운영과 무관하다)
+kubectl get secret postgres-preview-secrets -n preview -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d; echo
+
+# PR #27 의 database
+psql "postgresql://tapple@localhost:15434/tapple_pr27"
+```
+
+| 항목 | 값 |
+|---|---|
+| Host / Port | `localhost` / `15434` |
+| Database | `tapple_pr<PR번호>` |
+| User | `tapple` |
+| Password | 위에서 꺼낸 값 |
+
+**dev·prod 와 달리 쓰기가 열려 있다.** 프리뷰는 버려도 되는 환경이라 마이그레이션 시험이나
+데이터 조작을 마음껏 해도 된다. 다른 PR 의 database 는 별개라 영향이 없다.
+
+`database "tapple_pr27" does not exist` 가 나오면 그 PR 에 `preview` 라벨이 없거나
+환경이 아직 뜨는 중이다. 라벨을 붙이고 3~5분 뒤 다시 시도한다.
+
+**앱 로그도 볼 수 있다** — 자기 PR 이 왜 안 뜨는지 확인하는 용도다.
+
+```bash
+kubectl logs -n preview -l app.kubernetes.io/instance=tapple-preview-27 --tail=50
+```
+
+> PR 을 닫으면 앱·Service·Ingress 는 사라지지만 **database 는 남는다.** 주 1회 도는
+> 정리 CronJob 이 7일 넘게 접속이 없는 것을 지운다. 닫은 직후에도 데이터를 확인할 수 있다.
+
 ## 4. 자주 막히는 것
 
 **`error: unable to listen on any of the requested ports`**
@@ -180,6 +219,11 @@ kubectl auth can-i --as=$SA create pods --subresource=exec -n db              # 
 kubectl auth can-i --as=$SA get secrets -n db                                 # no
 kubectl auth can-i --as=$SA list secrets -n dev-db                            # no (get 만 줬다)
 kubectl auth can-i --as=$SA get pods -n argocd                                # no
+
+# 프리뷰
+kubectl auth can-i --as=$SA create pods --subresource=portforward -n preview  # yes
+kubectl auth can-i --as=$SA get secret/postgres-preview-secrets -n preview    # yes
+kubectl auth can-i --as=$SA delete pods -n preview                            # no
 ```
 
 **실측 기록 (2026-08-10)** — 위 절차를 처음부터 끝까지 밟아 확인한 결과:
