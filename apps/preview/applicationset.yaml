@@ -68,9 +68,11 @@ spec:
             - values.yaml
             - values-preview.yaml
           parameters:
-            # 이미지 태그는 PR head 커밋. cd-gitops.yml 이 12자리로 태깅한다
+            # 이미지 태그는 PR head 커밋 12자리. cd-gitops.yml 이 같은 값으로 태깅한다.
+            # slice 는 배열용이라 문자열에 쓰면 "list should be type of slice or array but string"
+            # 으로 죽는다. sprig 의 substr 을 쓴다.
             - name: image.tag
-              value: "{{ slice .head_sha 0 12 }}"
+              value: "{{ substr 0 12 .head_sha }}"
             - name: fullnameOverride
               value: "tapple-server-pr-{{ .number }}"
             - name: ingress.host
