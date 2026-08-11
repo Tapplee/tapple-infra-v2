@@ -14,6 +14,10 @@
 
 **아키텍처** — 앱·DB 네임스페이스의 실제 리소스. 라이브 클러스터에서 KubeDiagrams 로 파생시킨 것이라 이 시점의 사실이다.
 
+**prod 는 `app` + `db`, dev 는 `dev-app` + `dev-db`다.** prod 에 접두어가 없는 게 원래 매니페스트 관례라 이름만으로는 드러나지 않아, 각 리소스에 `environment` 라벨을 붙여 그림에 `환경: prod` / `환경: dev` 박스로 나오게 했다. `kubectl get ns -l environment=prod` 로도 고를 수 있다.
+
+`data-postgres-0` PVC 하나만 그 박스 밖에 있다. StatefulSet 의 `spec.volumeClaimTemplates` 가 불변 필드라 라벨을 추가할 수 없다 — 넣으면 기존 워크로드 갱신이 admission 단계에서 거부된다.
+
 <picture>
   <img alt="app·db·dev-app·dev-db 네임스페이스의 Deployment·StatefulSet·Service·Ingress·PVC 구성" src="docs/diagrams/out/architecture-app.png">
 </picture>
