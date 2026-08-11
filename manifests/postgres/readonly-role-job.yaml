@@ -16,6 +16,8 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: postgres-readonly-role
+  labels:
+    environment: prod
   namespace: db
   annotations:
     argocd.argoproj.io/sync-options: Replace=true
