@@ -40,6 +40,25 @@
   <img alt="push에서 GitHub Actions·ghcr·인프라 레포 태그 커밋을 거쳐 ArgoCD가 pull 배포하는 흐름" src="docs/diagrams/out/cicd-flow.png">
 </picture>
 
+**브랜치 하나가 올라가는 길** — 기능 브랜치를 따서 dev 를 거쳐 prod 까지 가는 순서와, 잘못됐을 때 되돌리는 두 경로. 혼자 운영하는 전제로 그렸다. **주황이 사람이 눌러야 하는 것, 파랑이 자동, 빨강이 되돌리기**다.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)"  srcset="docs/diagrams/out/branch-flow-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/diagrams/out/branch-flow.png">
+  <img alt="기능 브랜치에서 dev·main을 거쳐 배포되고, ArgoCD UI 또는 git revert로 되돌리는 흐름" src="docs/diagrams/out/branch-flow.png">
+</picture>
+
+사람이 누르는 지점이 **네 곳뿐**이다 — 브랜치 따기, dev 로 Squash 머지, dev 에서 확인, main 으로 Merge commit. 나머지는 자동이다.
+
+되돌리기는 두 경로가 있고 성질이 다르다.
+
+| | 방법 | 속도 | Git 상태 |
+|---|---|---|---|
+| ⓐ | ArgoCD UI → HISTORY → 이전 버전 | 초 단위 | 그대로. **self-heal 이 다시 최신으로 되돌릴 수 있다** — 임시 조치 |
+| ⓑ | `git revert` → push | 분 단위 (빌드 포함) | Git 이 정답지로 남는다. **영구 조치** |
+
+급하면 ⓐ 로 막고, ⓑ 로 마무리한다. ⓐ 만 하고 끝내면 다음 sync 에서 되살아난다.
+
 **GitOps 제어 흐름** — 수동 apply 는 `bootstrap/root-app.yaml` 하나뿐이고, 나머지 13개 Application 은 그것이 만든다. 점선이 순서 의존(sync wave)이다.
 
 <picture>
