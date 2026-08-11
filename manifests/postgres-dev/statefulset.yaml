@@ -57,6 +57,10 @@ spec:
             - name: POSTGRES_DB
               valueFrom:
                 secretKeyRef: { name: postgres-secrets, key: POSTGRES_DB }
+            # PGDATA 를 볼륨 루트가 아닌 하위 디렉터리로 둔다 — 공식 이미지 권고사항이고,
+            # 볼륨 루트에 lost+found 같은 게 있어도 initdb 가 거부하지 않는다
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           resources:
             requests:
               cpu: 250m
@@ -80,8 +84,11 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
           volumeMounts:
+            # prod 와 같은 이유 — postgres:16 의 PGDATA 경로에 정확히 마운트해야 한다.
+            # 한 단계 위에 마운트하면 이미지가 선언한 VOLUME 이 익명 볼륨으로 PVC 를 덮고,
+            # 데이터가 컨테이너 스냅샷에 쌓여 파드 재생성 시 사라진다.
             - name: data
-              mountPath: /var/lib/postgresql
+              mountPath: /var/lib/postgresql/data
             - name: tmp
               mountPath: /tmp
             - name: run

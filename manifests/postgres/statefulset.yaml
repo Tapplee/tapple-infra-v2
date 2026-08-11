@@ -64,6 +64,10 @@ spec:
             - name: POSTGRES_DB
               valueFrom:
                 secretKeyRef: { name: postgres-secrets, key: POSTGRES_DB }
+            # PGDATA 를 볼륨 루트가 아닌 하위 디렉터리로 둔다 — 공식 이미지 권고사항이고,
+            # 볼륨 루트에 lost+found 같은 게 있어도 initdb 가 거부하지 않는다
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           # Guaranteed QoS: requests == limits (cpu·memory 모두) — 계획 §4-3 eviction 방어
           # Guaranteed QoS 조건: cpu·memory 모두 requests == limits
           # 예약해도 유휴분은 다른 파드가 쓴다 — vacuum·인덱스 빌드·pg_dump에 실코어 2개 확보
@@ -90,10 +94,15 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
           volumeMounts:
-            # PG 18 이미지는 마운트 지점이 /var/lib/postgresql (17 이하의 /var/lib/postgresql/data 아님).
-            # PGDATA 기본값 /var/lib/postgresql/18/docker — lost+found 문제 자동 회피
+            # postgres:16 은 PGDATA 가 /var/lib/postgresql/data 이고, 이미지가 그 경로를
+            # VOLUME 으로 선언한다. 한 단계 위(/var/lib/postgresql)에 PVC 를 마운트하면
+            # containerd 가 그 이미지 VOLUME 을 익명 볼륨으로 만들어 PVC 를 덮어버린다
+            # → 데이터가 컨테이너 스냅샷에 쌓이고 파드 재생성 시 사라진다(실측으로 확인).
+            # 그래서 정확히 그 경로에 마운트해 익명 볼륨이 생기지 않게 한다.
+            # (매니페스트 원안은 postgres:18 기준이었고, 18 은 데이터 경로가
+            #  /var/lib/postgresql/<버전>/docker 라 한 단계 위 마운트가 맞았다)
             - name: data
-              mountPath: /var/lib/postgresql
+              mountPath: /var/lib/postgresql/data
             - name: tmp
               mountPath: /tmp
             - name: run
