@@ -3,7 +3,13 @@
 {{- end }}
 
 {{- define "tapple-server.fullname" -}}
-{{- printf "%s" .Chart.Name | trunc 63 | trimSuffix "-" -}}
+{{- /*
+  기본은 차트 이름 그대로다. prod·dev 는 네임스페이스가 달라 이름이 같아도 충돌하지 않는다.
+  PR 프리뷰는 여러 개가 preview 네임스페이스 하나에 들어가므로 fullnameOverride 로 구분한다.
+  .Release.Name 을 쓰지 않는 이유 — 그러면 prod(tapple-server)는 그대로지만
+  dev(dev-tapple-server)의 리소스 이름이 바뀌어 기존 워크로드가 재생성된다.
+*/ -}}
+{{- default .Chart.Name .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end }}
 
 {{- define "tapple-server.labels" -}}

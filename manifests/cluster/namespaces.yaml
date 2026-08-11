@@ -42,3 +42,13 @@ metadata:
   name: dev-db
   labels:
     environment: dev
+---
+# PR 프리뷰 전용. PR 마다 네임스페이스를 만들지 않고 여기 하나로 모은다 —
+# SealedSecret 이 (네임스페이스, 이름)에 묶여 암호화되므로, PR 마다 만들면
+# PR 이 열릴 때마다 사람이 씰링해야 해서 자동화가 성립하지 않는다.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: preview
+  labels:
+    environment: preview

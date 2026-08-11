@@ -1,0 +1,93 @@
+# PR 프리뷰 — PR 하나당 Application 을 자동 생성하고, PR 이 닫히면 지운다.
+#
+# 왜 라벨 필터인가: 열린 PR 전부에 환경을 띄우면 노드 메모리가 바닥난다.
+# `preview` 라벨을 붙인 PR 만 배포한다 — 라벨이 곧 자리 예약이고, 의도를 명시하는 장치다.
+#
+# 왜 preview 네임스페이스 하나인가: SealedSecret 은 (네임스페이스, 이름)에 묶여 암호화된다.
+# PR 마다 네임스페이스를 만들면 PR 이 열릴 때마다 사람이 씰링해야 해서 자동화가 성립하지 않는다.
+# cluster-wide 스코프 씰링은 그 시크릿을 아무 네임스페이스에서나 풀 수 있게 만드는 것이라
+# 프리뷰 편의로 감수할 트레이드오프가 아니다.
+#
+# 필요한 것
+#   - Secret preview-github-token (argocd 네임스페이스) : PR 목록 조회용 PAT.
+#     tapple-be 가 private 이라 토큰 없이는 PR 을 못 읽는다. 권한은 contents:read + pull_requests:read.
+#   - tapple-be 의 cd-gitops.yml 이 라벨 붙은 PR 브랜치의 이미지를 ghcr 에 올려둬야 한다.
+#     그 이미지가 없으면 파드가 ImagePullBackOff 로 남는다.
+#
+# 한계 — 구글 로그인은 프리뷰에서 동작하지 않는다.
+#   Google OAuth 는 리다이렉트 URI 를 와일드카드 없이 사전 등록해야 하고 HTTPS 만 받는다.
+#   프리뷰 URL 은 동적이고 지금은 http nip.io 다. 그래서 프리뷰는 개발자용(API·Swagger)이고,
+#   로그인이 필요한 화면 확인은 실도메인+TLS 가 붙은 환경에서 한다.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: tapple-server-preview
+  namespace: argocd
+spec:
+  # PR 이 닫히면 Application 과 그 리소스를 지운다
+  syncPolicy:
+    preserveResourcesOnDeletion: false
+
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+
+  generators:
+    - pullRequest:
+        github:
+          owner: Tapplee
+          repo: tapple-be
+          tokenRef:
+            secretName: preview-github-token
+            key: token
+          # `preview` 라벨이 붙은 PR 만. 라벨 필터는 github 하위에 있다 —
+          # filters[] 는 branchMatch·targetBranchMatch·titleMatch 만 받는다(CRD 스키마 확인).
+          labels:
+            - preview
+        requeueAfterSeconds: 120
+
+  template:
+    metadata:
+      name: "tapple-preview-{{ .number }}"
+      labels:
+        environment: preview
+        preview.tapple/pr: "{{ .number }}"
+      annotations:
+        # PR 브랜치와 커밋을 Application 에 남겨 UI 에서 바로 추적되게
+        preview.tapple/branch: "{{ .branch }}"
+        preview.tapple/head-sha: "{{ .head_sha }}"
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/Tapplee/tapple-infra-v2.git
+        targetRevision: main
+        path: charts/tapple-server
+        helm:
+          valueFiles:
+            - values.yaml
+            - values-preview.yaml
+          parameters:
+            # 이미지 태그는 PR head 커밋. cd-gitops.yml 이 12자리로 태깅한다
+            - name: image.tag
+              value: "{{ slice .head_sha 0 12 }}"
+            - name: fullnameOverride
+              value: "tapple-server-pr-{{ .number }}"
+            - name: ingress.host
+              value: "pr-{{ .number }}.api.141.164.40.139.nip.io"
+            - name: createDatabase.name
+              value: "tapple_pr{{ .number }}"
+            - name: env.POSTGRES_URL
+              value: "jdbc:postgresql://postgres-preview.preview.svc.cluster.local:5432/tapple_pr{{ .number }}"
+            - name: env.SPRING_APPLICATION_NAME
+              # 대시보드 Service 드롭다운에서 PR 별로 골라 볼 수 있게
+              value: "taple-pr{{ .number }}"
+            - name: env.DEPLOY_ENV
+              value: "preview"
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: preview
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: true
