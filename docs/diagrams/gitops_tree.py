@@ -40,21 +40,25 @@ def build(theme: dict) -> None:
         root = Argocd("root\nbootstrap/root-app.yaml")
 
         with Cluster("wave -3  클러스터 기반", graph_attr=ca):
-            cluster_app = Namespace("cluster\n네임스페이스 5 + PriorityClass 3")
+            cluster_app = Namespace(
+                "cluster\n네임스페이스 6 + PriorityClass 4\nNetworkPolicy · RBAC"
+            )
 
         with Cluster("wave -2  컨트롤러", graph_attr=ca):
             sealed = Helm("sealed-secrets\nupstream 차트")
 
         with Cluster("wave -1  시크릿", graph_attr=ca):
-            secrets = Secret("secrets\nSealedSecret 9")
+            secrets = Secret("secrets\nSealedSecret 14")
 
         with Cluster("wave 0  데이터베이스", graph_attr=ca):
-            pg = Helm("postgres        [db]")
-            pg_dev = Helm("dev-postgres  [dev-db]")
+            pg = Helm("postgres                    [db]")
+            pg_dev = Helm("dev-postgres          [dev-db]")
+            pg_prev = Helm("preview-postgres  [preview]")
 
         with Cluster("wave 1  앱", graph_attr=ca):
             app = Helm("tapple-server        [app]")
             app_dev = Helm("dev-tapple-server  [dev-app]")
+            appset = Argocd("ApplicationSet\nPR 당 Application  [preview]")
 
         with Cluster("wave 2  관측", graph_attr=ca):
             mon = Grafana("grafana · prometheus\nloki · tempo · otel-collector\nmonitoring-config")
@@ -64,8 +68,10 @@ def build(theme: dict) -> None:
         root >> Edge(color=WAVE) >> secrets
         root >> Edge(color=WAVE) >> pg
         root >> Edge(color=WAVE) >> pg_dev
+        root >> Edge(color=WAVE) >> pg_prev
         root >> Edge(color=WAVE) >> app
         root >> Edge(color=WAVE) >> app_dev
+        root >> Edge(color=WAVE) >> appset
         root >> Edge(color=WAVE) >> mon
 
         root >> Edge(label="3분마다 읽음 (pull)", style="dashed", color=DEP, fontcolor=DEP) >> repo
@@ -75,6 +81,7 @@ def build(theme: dict) -> None:
         sealed >> Edge(label="컨트롤러가 있어야 복호화", style="dotted") >> secrets
         secrets >> Edge(label="자격증명이 있어야 기동", style="dotted") >> pg
         pg >> Edge(label="DB 가 있어야 Flyway", style="dotted") >> app
+        pg_prev >> Edge(label="공유 DB 가 있어야 프리뷰", style="dotted") >> appset
 
 
 if __name__ == "__main__":
