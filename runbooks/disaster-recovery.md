@@ -28,7 +28,13 @@ kubectl get applications -n argocd -w
 kubectl exec -n db postgres-0 -- sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists' < taple-<최신>.dump
 
 # 6. Cloudflare A 레코드가 새 노드 IP인지 확인 → 앱 헬스체크
+#    grafana-k3s 레코드도 같이 바꿀 것 (docs/monitoring-access.md)
 curl -s https://<도메인>/actuator/health
+
+# 7. Grafana 팀원 계정 재등록
+#    사용자 목록은 Grafana 의 sqlite(PVC)에 있어 Git 이 복원해주지 않는다.
+#    대시보드·데이터소스는 자동 복원되므로 사람만 다시 넣으면 된다.
+#    절차: docs/monitoring-access.md 의 "팀원 등록"
 ```
 
 ## 검증 체크리스트
@@ -37,3 +43,4 @@ curl -s https://<도메인>/actuator/health
 - [ ] `kubectl get pod postgres-0 -n db -o jsonpath='{.status.qosClass}'` = Guaranteed
 - [ ] 앱 → DB 쿼리 정상 (헬스체크 200)
 - [ ] 다음 pg-backup CronJob 성공 확인
+- [ ] Grafana 로그인 + 팀원 계정 재등록 완료 (Git 이 복원하지 않는 유일한 상태)

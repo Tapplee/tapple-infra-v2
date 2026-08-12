@@ -115,6 +115,7 @@ scripts/gen-team-kubeconfig.sh  팀원용 SA 토큰 kubeconfig 발급 (기본 90
 .github/workflows/seal-secret.yml  SSH 없이 시크릿 재씰링 — Actions 금고 값을 읽어 secrets/ 에 커밋
 runbooks/                   재해 복구 절차
 docs/db-access.md           팀원 DB 접속 가이드 (port-forward + 최소권한 RBAC)
+docs/monitoring-access.md   팀원 Grafana 접속 — 구글 로그인, PR별 지표·로그 찾는 법
 docs/preview-environments.md  PR 프리뷰 사용법 — 팀원이 먼저 읽을 문서
 docs/diagrams/              위 그림들의 생성 스크립트 (직접 실행, CI 자동화 없음)
 ```
@@ -254,7 +255,8 @@ PR 프리뷰 쪽 함정 4개(라벨 필터 위치, sprig `substr` 인자 순서,
 
 ## 남은 TODO
 
-- [ ] **도메인 + TLS** — 지금은 nip.io `http`. **이것 때문에 k3s 세 환경(prod·dev·preview) 전부 구글 로그인이 안 된다** (Google OAuth 는 리다이렉트 URI 사전 등록 + HTTPS 요구). 로그인 화면 확인은 홈서버에서. 고칠 곳은 `values.yaml`·`values-dev.yaml` 의 `ingress.host` 와 ApplicationSet 의 프리뷰 호스트
+- [ ] **도메인 + TLS** — 지금은 nip.io `http`. **이것 때문에 k3s 세 환경(prod·dev·preview) 전부 구글 로그인이 안 된다** (Google OAuth 는 리다이렉트 URI 사전 등록 + HTTPS 요구). 로그인 화면 확인은 홈서버에서. 고칠 곳은 `values.yaml`·`values-dev.yaml` 의 `ingress.host` 와 ApplicationSet 의 프리뷰 호스트. **프리뷰 호스트는 1단으로 평평하게** — Cloudflare Universal SSL 이 `*.tapple.co.kr` 까지만 커버하므로 `pr-27.api.tapple.co.kr` 은 인증서가 안 맞는다. `pr-27-api.tapple.co.kr` 로
+- [ ] **Grafana 팀원 공개 — 사람 손 3개 남음** ([docs/monitoring-access.md](docs/monitoring-access.md)). 레포 쪽은 다 들어가 있고 스위치가 꺼져 있다: ①Cloudflare A 레코드 `grafana-k3s` → 노드 IP ②Google Console 리다이렉트 URI ③`Seal secrets` → `grafana-oauth` ④`grafana.yaml` 의 `auth.google.enabled: true`. 그때까지 **팀원이 모니터링을 볼 방법이 없다**
 - [ ] Discord webhook 실값 — 지금은 더미라 알림이 아무데도 가지 않는다 (홈서버 `.env`도 `CHANGEME`)
 - [ ] 컷오버 전 로테이션 — AWS 키·Google 시크릿·JWT 키. 지금 클러스터엔 더미가 들어가 있다. `JWT_SECRET_KEY` 를 바꾸면 전원이 즉시 로그아웃되고, `SLUG_RESERVATION_HMAC_KEY` 는 이전 키를 `previousKeys` 에 **남긴 채** 버전만 올려야 한다
 - [ ] `PREVIEW_GITHUB_TOKEN` 만료 관리 — fine-grained PAT 이라 만료되면 **프리뷰가 조용히 안 뜬다**. 증상은 ApplicationSet 상태의 `error fetching Secret token`
