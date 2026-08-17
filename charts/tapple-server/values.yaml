@@ -17,7 +17,7 @@ priorityClassName: app-important
 image:
   repository: ghcr.io/tapplee/tapple-be
   # 커밋 SHA 태그. 비우면 배포 실패하도록 required 처리 (mutable :latest 금지)
-  tag: "31f16f96f377"
+  tag: "6d090bee4240"
   pullPolicy: IfNotPresent
 
 # ghcr private pull용 시크릿 (secrets/ghcr-pull.yaml, app 네임스페이스)
