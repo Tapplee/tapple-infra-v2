@@ -4,7 +4,7 @@
 environment: dev
 
 image:
-  tag: "bb109ceb1e07"
+  tag: "023a1b221852"
 
 ingress:
   enabled: true
