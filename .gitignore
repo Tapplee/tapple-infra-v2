@@ -1,0 +1,8 @@
+.DS_Store
+**/.DS_Store
+
+# Ansible controller-local inventory and secret material
+ansible/.venv/
+ansible/inventories/*/hosts.yml
+ansible/.vault-password
+ansible/**/*.retry
