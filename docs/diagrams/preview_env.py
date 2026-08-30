@@ -1,25 +1,7 @@
-"""PR 프리뷰 환경 — feat 브랜치마다 임시 환경을 띄운다.
+"""PR 프리뷰 수명주기 — 생성·검증·정리와 공유 자원만 표시한다.
 
-목표: PR 을 올리면 그 브랜치만의 URL 이 생기고, PR 을 닫으면 사라진다.
-      dev 환경 하나를 여러 작업이 번갈아 쓰면서 서로 덮어쓰는 문제를 없앤다.
-
-장치는 ArgoCD ApplicationSet 의 Pull Request 생성기다. PR 목록을 폴링해
-PR 하나당 Application 을 자동으로 만들고, PR 이 닫히면 그 Application 을 지운다.
-
-설계 판단 세 개 (각각 대안이 있었다):
-
-1) 네임스페이스를 PR 마다 만들지 않고 preview 하나로 모은다
-   SealedSecret 은 (네임스페이스, 이름)에 묶여 암호화되므로 PR 마다 네임스페이스를 만들면
-   시크릿을 재사용할 수 없다. PR 이 열릴 때마다 사람이 씰링해야 하면 자동화가 성립하지 않는다.
-   cluster-wide 스코프로 씰링하는 방법도 있지만 그건 그 시크릿을 아무 네임스페이스에서나
-   풀 수 있게 만드는 것이라 프리뷰 편의로 감수할 트레이드오프가 아니다.
-
-2) DB 는 프리뷰 전용 postgres 한 대를 공유하고, PR 마다 database 를 따로 만든다
-   database 를 나누지 않으면 여러 PR 의 Flyway 가 같은 스키마를 동시에 고쳐 서로를 깬다.
-   postgres 를 PR 마다 띄우면 메모리가 남지 않는다(아래 예산).
-
-3) 우선순위를 dev 보다 더 낮게 둔다
-   메모리 압박 시 프리뷰가 가장 먼저 죽어야 한다. dev-low 아래 preview-lowest 를 새로 만든다.
+AWS 인증과 ESO 내부 동작은 secret_supply_chain.py로 분리한다. 이 그림에서 중요한
+보안 전제는 preview가 신뢰된 내부 PR만 받으며 모든 PR이 같은 자격증명을 공유한다는 점이다.
 
     python preview_env.py   →  out/preview-env.png, out/preview-env-dark.png
 """
@@ -27,6 +9,7 @@ PR 하나당 Application 을 자동으로 만들고, PR 이 닫히면 그 Applic
 from diagrams import Cluster, Diagram, Edge
 from diagrams.k8s.compute import Deployment, Job, StatefulSet
 from diagrams.k8s.network import Ingress
+from diagrams.k8s.podconfig import Secret
 from diagrams.onprem.ci import GithubActions
 from diagrams.onprem.client import User
 from diagrams.onprem.container import Docker
@@ -35,60 +18,125 @@ from diagrams.onprem.vcs import Github
 
 from theme import THEMES, cluster_attr, edge_attr, graph_attr, node_attr
 
-NEW = "#D68910"    # 사람 손이 필요한 지점
-AUTO = "#4C8FD0"   # 자동
-GONE = "#8B95A1"   # PR 닫힐 때 사라지는 것
+MANUAL = "#D68910"
+AUTO = "#4C8FD0"
+DELETE = "#8B95A1"
+RISK = "#E5534B"
 
 
 def build(theme: dict) -> None:
     ca = cluster_attr(theme)
+    fg = theme["fg"]
+
     with Diagram(
-        "PR 프리뷰 환경 — 주황이 사람 손이 필요한 지점",
+        "PR 프리뷰 수명주기 — 신뢰된 내부 PR만 지원",
         filename=f"out/preview-env{theme['name']}",
         outformat="png",
         show=False,
-        graph_attr=graph_attr(theme, rankdir="LR", ranksep="1.3", nodesep="0.6"),
+        graph_attr=graph_attr(theme, rankdir="LR", ranksep="1.1", nodesep="0.6"),
         node_attr=node_attr(theme),
         edge_attr=edge_attr(theme),
     ):
-        me = User("개발자")
+        developer = User("개발자", fontcolor=fg)
 
         with Cluster("tapple-be", graph_attr=ca):
-            pr = Github("PR #42\nfeat/new-func")
-            cd = GithubActions("cd-gitops.yml\npreview 라벨 PR 빌드")
+            pr = Github("PR #42\npreview 라벨", fontcolor=fg)
+            build = GithubActions("cd-gitops.yml\nhead SHA 빌드", fontcolor=fg)
 
-        registry = Docker("ghcr.io/tapplee/tapple-be\n:<PR head SHA>")
+        image = Docker("ghcr.io/tapplee/tapple-be\n:<PR head SHA>", fontcolor=fg)
 
-        with Cluster("tapple-infra-v2", graph_attr=ca):
-            appset = Github("applicationset.yaml\nPR 생성기")
+        with Cluster("선행 설치 · PR마다 반복하지 않음", graph_attr=ca):
+            appset = Argocd(
+                "ApplicationSet\nPull Request generator\n120초 polling",
+                fontcolor=fg,
+            )
+            shared_secrets = Secret(
+                "ESO-managed shared secrets\nargocd: GitHub token\npreview: app · GHCR · PostgreSQL",
+                fontcolor=fg,
+            )
 
-        argo = Argocd("ArgoCD\nApplicationSet")
+        with Cluster("k3s · namespace preview", graph_attr=ca):
+            with Cluster("PR마다 생성 · PR 종료 시 삭제", graph_attr=ca):
+                application = Argocd("Application\npr-42", fontcolor=fg)
+                ingress = Ingress("pr-42.api.<host>", fontcolor=fg)
+                app = Deployment(
+                    "tapple-server-pr-42\n1Gi · preview-lowest",
+                    fontcolor=fg,
+                )
+                create_db = Job("createdb Job\ntapple_pr42", fontcolor=fg)
 
-        with Cluster("k3s  ·  ns preview", graph_attr=ca):
-            with Cluster("PR 하나당 자동 생성 · 닫으면 삭제", graph_attr=ca):
-                ing = Ingress("pr-42.api.<ip>\n.nip.io")
-                app = Deployment("tapple-server-pr-42\n1Gi · preview-lowest")
-                dbjob = Job("createdb Job\ntapple_pr42")
-            pg = StatefulSet("postgres-preview\n공유 1대 · 1Gi")
+            postgres = StatefulSet(
+                "postgres-preview\n모든 PR이 공유 · DB만 분리",
+                fontcolor=fg,
+            )
 
-        me >> Edge(label="① PR + preview 라벨", color=NEW, fontcolor=NEW) >> pr
-        pr >> Edge(label="자동 빌드", color=AUTO) >> cd >> Edge(color=AUTO) >> registry
+        warning = Secret(
+            "격리 경계\nPR별 secret isolation 없음\n외부·fork PR 금지",
+            fontcolor=fg,
+        )
 
-        argo >> Edge(label="② PR 목록 폴링\n(GitHub 토큰 필요)", color=NEW,
-                     fontcolor=NEW, style="dashed") >> appset
-        appset >> Edge(label="PR 당 Application 1개", color=NEW, fontcolor=NEW) >> argo
+        developer >> Edge(
+            label="① PR + preview 라벨",
+            color=MANUAL,
+            fontcolor=MANUAL,
+        ) >> pr
+        pr >> Edge(label="② 자동 빌드", color=AUTO, fontcolor=AUTO) >> build
+        build >> Edge(label="immutable image", color=AUTO, fontcolor=AUTO) >> image
 
-        argo >> Edge(label="③ 생성", color=AUTO) >> ing
-        argo >> Edge(color=AUTO) >> app
-        argo >> Edge(color=AUTO) >> dbjob
+        appset >> Edge(
+            label="③ PR 감지",
+            color=AUTO,
+            fontcolor=AUTO,
+            style="dashed",
+        ) >> pr
+        appset >> Edge(label="④ Application 생성", color=AUTO, fontcolor=AUTO) >> application
 
-        app >> Edge(label="이미지 pull", color=AUTO, style="dotted") >> registry
-        dbjob >> Edge(label="database 생성\n(멱등)", color=NEW, fontcolor=NEW) >> pg
-        app >> Edge(label="jdbc .../tapple_pr42\nFlyway 가 스키마 생성", color=AUTO) >> pg
+        application >> Edge(color=AUTO) >> ingress
+        application >> Edge(color=AUTO) >> app
+        application >> Edge(color=AUTO) >> create_db
+        app >> Edge(label="image pull", color=AUTO, fontcolor=AUTO, style="dotted") >> image
 
-        ing >> Edge(label="④ 이 URL 로 검증", color=NEW, fontcolor=NEW, style="dotted") >> me
-        me >> Edge(label="⑤ PR 닫음 → Application 삭제\n→ Deployment·Svc·Ingress 사라짐",
-                   color=GONE, fontcolor=GONE, style="dashed") >> pr
+        shared_secrets >> Edge(
+            label="preview-github-token",
+            style="dotted",
+            fontcolor=fg,
+        ) >> appset
+        shared_secrets >> Edge(
+            label="envFrom · imagePullSecrets",
+            style="dotted",
+            fontcolor=fg,
+        ) >> app
+        shared_secrets >> Edge(
+            label="POSTGRES_*",
+            style="dotted",
+            fontcolor=fg,
+        ) >> postgres
+
+        create_db >> Edge(label="멱등 생성", color=AUTO, fontcolor=AUTO) >> postgres
+        app >> Edge(
+            label="jdbc …/tapple_pr42\nFlyway",
+            color=AUTO,
+            fontcolor=AUTO,
+        ) >> postgres
+        ingress >> Edge(
+            label="⑤ URL 검증",
+            color=MANUAL,
+            fontcolor=MANUAL,
+            style="dotted",
+        ) >> developer
+
+        developer >> Edge(
+            label="⑥ PR 닫기/라벨 제거\nApplication과 PR 리소스 삭제",
+            color=DELETE,
+            fontcolor=DELETE,
+            style="dashed",
+        ) >> pr
+        warning >> Edge(
+            label="공유 credential",
+            color=RISK,
+            fontcolor=RISK,
+            style="dotted",
+        ) >> shared_secrets
 
 
 if __name__ == "__main__":

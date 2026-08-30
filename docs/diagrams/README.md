@@ -2,20 +2,26 @@
 
 자동화하지 않았다. 클러스터 구조는 몇 주에 한 번 바뀌므로 사람이 다시 뽑는 게 싸다. 대신 **절차를 여기 남겨** 누구든 5분에 재생성할 수 있게 한다.
 
-이미지에는 스냅샷 날짜를 함께 표기한다 — 낡은 그림을 읽는 사람이 낡았다는 걸 알아야 한다.
+그림은 두 종류다. 라이브 클러스터에서 뽑은 그림은 `LIVE SNAPSHOT`, 매니페스트와 운영
+결정을 설명하는 흐름도는 `DESIRED STATE`다. 두 종류를 한 그림에서 섞지 않는다.
+
+현재 `architecture-app`과 `architecture-platform`은 2026-08-12의 **ESO 전환 전 snapshot**이다.
+실제 IDC 클러스터에 이 커밋을 배포하고 모든 Application·ExternalSecret이 Healthy가 되기 전에는
+덮어쓰지 않는다. 반면 나머지 흐름도는 이 저장소가 의도하는 상태를 설명한다.
 
 ## 두 도구를 나눠 쓴다
 
 | 산출물 | 도구 | 이유 |
 |---|---|---|
 | `architecture-app` · `architecture-platform` | **KubeDiagrams** | 클러스터의 실제 상태에서 **파생**시킨다. 손으로 그리면 반드시 낡는다 |
-| `cicd-flow` · `traffic-flow` · `gitops-tree` | **mingrammer/diagrams** | 매니페스트에 없는 것들이다. 아래 참고 |
+| `branch-flow` · `cicd-flow` · `traffic-flow` · `gitops-tree` · `preview-env` · `secret-supply-chain` | **mingrammer/diagrams** | 매니페스트 밖 GitHub·AWS 제어/데이터 흐름이 있다. 아래 참고 |
 
 **mingrammer 로 그리는 것들이 왜 파생될 수 없나**
 
 - `app → postgres` — `POSTGRES_URL` 환경변수 안의 접속 문자열이다. k8s 참조가 아니라 값이라 도구가 추론할 수 없다
 - `app → otel-collector` — 같은 이유(`OTEL_URL`)
-- `root-app → 자식 13개` — ArgoCD Application 의 `directory.recurse: true` 한 줄에 숨어 있다
+- `root-app → Application 14개 + ApplicationSet 1개` — ArgoCD Application 의 `directory.recurse: true` 한 줄에 숨어 있다
+- `Ansible → secret-zero → STS → Secrets Manager → ESO → Kubernetes Secret` — 인증·신뢰·데이터 경계가 여러 시스템에 걸쳐 있다
 - CI/CD 전체 — GitHub Actions·ghcr·git 커밋은 클러스터 리소스가 아니다
 
 두 그림은 대체 관계가 아니라 **축이 다르다.** KubeDiagrams 는 "무엇이 있는가"(인벤토리와 소유 관계), mingrammer 는 "누가 누구를 부르는가"(트래픽과 제어).
@@ -46,13 +52,22 @@ mkdir -p .snapshot out
 for ns in app db dev-app dev-db; do
   kubectl get deployment,statefulset,service,ingress,pvc,cronjob -n $ns -o yaml > .snapshot/10-$ns.yaml
 done
-for ns in monitoring argocd kube-system; do
+for ns in monitoring argocd external-secrets kube-system; do
   kubectl get deployment,statefulset,daemonset,service,pvc -n $ns -o yaml > .snapshot/20-$ns.yaml
 done
 
 .venv/bin/kube-diagrams -c kube-diagrams.yaml -o out/architecture-app      -f png .snapshot/10-*.yaml
 .venv/bin/kube-diagrams -c kube-diagrams.yaml -o out/architecture-platform -f png .snapshot/20-monitoring.yaml
 ```
+
+`architecture-platform`이라는 기존 파일명과 달리 현재 입력은 monitoring namespace뿐이다.
+IDC 전환 뒤에는 `architecture-observability`(monitoring)와
+`architecture-control-plane`(argocd·external-secrets·kube-system)으로 나눈다. 배포 전
+desired state만으로 라이브 그림을 미리 만들지는 않는다.
+
+재생성할 때 커밋 메시지나 PR 본문에 `capturedAt`, Git commit, k3s version,
+`kubectl config current-context`, 포함 namespace를 기록한다. image tag나 시크릿 값만 바뀌면
+토폴로지는 같으므로 다시 뽑지 않는다.
 
 주의할 점 세 개.
 
@@ -66,8 +81,11 @@ done
 
 ```bash
 .venv/bin/python cicd_flow.py       # 배포 파이프라인
+.venv/bin/python branch_flow.py     # 브랜치 승격·rollback
 .venv/bin/python traffic_flow.py    # 요청·관측·운영 접근 경로
-.venv/bin/python gitops_tree.py     # root-app → 자식 13개, sync wave 순서
+.venv/bin/python gitops_tree.py     # root-app → wave별 child Application health gate
+.venv/bin/python preview_env.py     # PR 수명주기와 공유 preview 자원
+.venv/bin/python secret_supply_chain.py  # Ansible·AWS IAM·Secrets Manager·ESO 신뢰 경계
 ```
 
 각 스크립트가 라이트·다크 두 벌을 만든다. `theme.py` 가 그 색 세트를 갖고 있다.

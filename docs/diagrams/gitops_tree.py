@@ -1,87 +1,98 @@
-"""GitOps 제어 흐름 — root-app 하나가 클러스터 전체를 세우는 구조.
+"""GitOps 동기화 순서 — root Application의 app-of-apps health gate.
 
-이 관계는 ArgoCD Application 의 `directory.recurse: true` 한 줄에 숨어 있어서
-YAML 구조상 드러나지 않는다. KubeDiagrams 는 Application 을 일반 커스텀 리소스로만
-그리고 root → 자식 관계를 추론하지 못한다. 그래서 손으로 그린다.
+이 그림은 AWS 시크릿 공급망이나 실제 워크로드 토폴로지를 다루지 않는다.
+root가 만드는 child Application/ApplicationSet과 wave별 진행 조건만 보여준다.
 
-sync-wave 가 순서를 정한다. 낮은 수가 먼저다 — 네임스페이스가 없으면 그 안에 뭘 만들 수 없고,
-시크릿 컨트롤러가 없으면 시크릿을 풀 수 없고, DB 가 없으면 앱이 뜰 수 없다.
+Application health customization이 child Application의 상태를 root에 전파하고,
+SecretStore/ExternalSecret health customization이 secrets Application의 상태에 반영돼야
+"Healthy 이후 다음 wave"가 실제 준비 순서가 된다.
 
     python gitops_tree.py   →  out/gitops-tree.png, out/gitops-tree-dark.png
 """
 
-from diagrams import Cluster, Diagram, Edge
-from diagrams.k8s.ecosystem import Helm
-from diagrams.k8s.group import Namespace
-from diagrams.k8s.podconfig import Secret
+from diagrams import Diagram, Edge
+from diagrams.k8s.others import CRD
 from diagrams.onprem.gitops import Argocd
-from diagrams.onprem.monitoring import Grafana
 from diagrams.onprem.vcs import Github
 
-from theme import THEMES, cluster_attr, edge_attr, graph_attr, node_attr
+from theme import THEMES, edge_attr, graph_attr, node_attr
 
-WAVE = "#4C8FD0"
-DEP = "#E5534B"
+SYNC = "#4C8FD0"
+GATE = "#2E8B57"
+NOTE = "#D68910"
 
 
 def build(theme: dict) -> None:
-    ca = cluster_attr(theme)
+    fg = theme["fg"]
 
     with Diagram(
-        "GitOps 제어 흐름 — 수동 apply 는 root-app 하나뿐",
+        "GitOps 동기화 순서 — 각 wave가 Healthy여야 다음 단계로 진행",
         filename=f"out/gitops-tree{theme['name']}",
         outformat="png",
         show=False,
-        graph_attr=graph_attr(theme, rankdir="LR", splines="ortho", ranksep="1.5"),
+        graph_attr=graph_attr(
+            theme,
+            rankdir="LR",
+            splines="ortho",
+            ranksep="1.0",
+            nodesep="0.5",
+        ),
         node_attr=node_attr(theme),
         edge_attr=edge_attr(theme),
     ):
-        repo = Github("tapple-infra-v2\nmain")
-        root = Argocd("root\nbootstrap/root-app.yaml")
+        repo = Github("tapple-infra-v2\nmain", fontcolor=fg)
+        root = Argocd("root Application\napps/ 재귀 sync", fontcolor=fg)
 
-        with Cluster("wave -3  클러스터 기반", graph_attr=ca):
-            cluster_app = Namespace(
-                "cluster\n네임스페이스 6 + PriorityClass 4\nNetworkPolicy · RBAC"
-            )
+        wave_cluster = Argocd(
+            "wave -3\ncluster\nApplication 1",
+            fontcolor=fg,
+        )
+        wave_eso = Argocd(
+            "wave -2\nexternal-secrets\nApplication 1",
+            fontcolor=fg,
+        )
+        wave_secrets = Argocd(
+            "wave -1\nsecrets\nApplication 1",
+            fontcolor=fg,
+        )
+        wave_db = Argocd(
+            "wave 0\nprod · dev · preview PostgreSQL\nApplication 3",
+            fontcolor=fg,
+        )
+        wave_app = Argocd(
+            "wave 1\nprod · dev app: Application 2\npreview: ApplicationSet 1",
+            fontcolor=fg,
+        )
+        wave_monitoring = Argocd(
+            "wave 2\nmonitoring stack\nApplication 6",
+            fontcolor=fg,
+        )
 
-        with Cluster("wave -2  컨트롤러", graph_attr=ca):
-            sealed = Helm("sealed-secrets\nupstream 차트")
+        health = CRD(
+            "Health gate\nApplication · ESO CRs\nroot 전에 pre-apply",
+            fontcolor=fg,
+        )
 
-        with Cluster("wave -1  시크릿", graph_attr=ca):
-            secrets = Secret("secrets\nSealedSecret 14")
+        repo >> Edge(
+            label="3분마다 pull",
+            color=SYNC,
+            fontcolor=SYNC,
+            style="dashed",
+        ) >> root
 
-        with Cluster("wave 0  데이터베이스", graph_attr=ca):
-            pg = Helm("postgres                    [db]")
-            pg_dev = Helm("dev-postgres          [dev-db]")
-            pg_prev = Helm("preview-postgres  [preview]")
+        root >> Edge(label="child CR 생성", color=SYNC, fontcolor=SYNC) >> wave_cluster
+        wave_cluster >> Edge(label="Healthy gate", color=GATE, fontcolor=GATE) >> wave_eso
+        wave_eso >> Edge(label="Healthy gate", color=GATE, fontcolor=GATE) >> wave_secrets
+        wave_secrets >> Edge(label="Secret Ready", color=GATE, fontcolor=GATE) >> wave_db
+        wave_db >> Edge(label="DB Ready", color=GATE, fontcolor=GATE) >> wave_app
+        wave_app >> Edge(label="App Ready", color=GATE, fontcolor=GATE) >> wave_monitoring
 
-        with Cluster("wave 1  앱", graph_attr=ca):
-            app = Helm("tapple-server        [app]")
-            app_dev = Helm("dev-tapple-server  [dev-app]")
-            appset = Argocd("ApplicationSet\nPR 당 Application  [preview]")
-
-        with Cluster("wave 2  관측", graph_attr=ca):
-            mon = Grafana("grafana · prometheus\nloki · tempo · otel-collector\nmonitoring-config")
-
-        root >> Edge(label="apps/ 재귀 sync", color=WAVE) >> cluster_app
-        root >> Edge(color=WAVE) >> sealed
-        root >> Edge(color=WAVE) >> secrets
-        root >> Edge(color=WAVE) >> pg
-        root >> Edge(color=WAVE) >> pg_dev
-        root >> Edge(color=WAVE) >> pg_prev
-        root >> Edge(color=WAVE) >> app
-        root >> Edge(color=WAVE) >> app_dev
-        root >> Edge(color=WAVE) >> appset
-        root >> Edge(color=WAVE) >> mon
-
-        root >> Edge(label="3분마다 읽음 (pull)", style="dashed", color=DEP, fontcolor=DEP) >> repo
-
-        # 순서 의존 — 앞이 없으면 뒤가 성립하지 않는다
-        cluster_app >> Edge(label="네임스페이스가 있어야", style="dotted") >> secrets
-        sealed >> Edge(label="컨트롤러가 있어야 복호화", style="dotted") >> secrets
-        secrets >> Edge(label="자격증명이 있어야 기동", style="dotted") >> pg
-        pg >> Edge(label="DB 가 있어야 Flyway", style="dotted") >> app
-        pg_prev >> Edge(label="공유 DB 가 있어야 프리뷰", style="dotted") >> appset
+        health >> Edge(
+            label="상태를 root에 전파",
+            color=NOTE,
+            fontcolor=NOTE,
+            style="dotted",
+        ) >> root
 
 
 if __name__ == "__main__":

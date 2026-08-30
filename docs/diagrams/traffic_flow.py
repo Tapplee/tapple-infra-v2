@@ -14,6 +14,7 @@ KubeDiagrams 의 아키텍처 그림은 "무엇이 있는가"(인벤토리)를 �
 
 from diagrams import Cluster, Diagram, Edge
 from diagrams.k8s.compute import Cronjob, Deployment, StatefulSet
+from diagrams.k8s.controlplane import API
 from diagrams.k8s.network import Ingress, Service
 from diagrams.generic.storage import Storage
 from diagrams.onprem.client import Users
@@ -46,9 +47,10 @@ def build(theme: dict) -> None:
 
         with Cluster("ns kube-system", graph_attr=ca):
             traefik = Traefik("traefik\n80 / 443")
+            api = API("kube-apiserver\n:6443 CIDR allowlist")
 
         with Cluster("ns app  ·  prod", graph_attr=ca):
-            ing = Ingress("api.<ip>.nip.io")
+            ing = Ingress("api.<domain>")
             svc = Service("tapple-server\n:80")
             app = Deployment("tapple-server\n8080")
 
@@ -57,13 +59,14 @@ def build(theme: dict) -> None:
             backup = Cronjob("pg-backup")
 
         with Cluster("ns dev-app  ·  dev", graph_attr=ca):
-            ing_d = Ingress("dev-api.<ip>.nip.io")
+            ing_d = Ingress("dev-api.<domain>")
             app_d = Deployment("tapple-server")
 
         with Cluster("ns dev-db  ·  dev", graph_attr=ca):
             pg_d = StatefulSet("postgres:16\nDB tapple_dev")
 
         with Cluster("ns monitoring  ·  prod·dev 공용", graph_attr=ca):
+            graf_ing = Ingress("grafana-k3s.<domain>")
             collector = Prometheus("otel-collector\n:4318")
             tempo = Tempo("tempo")
             loki = Loki("loki")
@@ -91,10 +94,12 @@ def build(theme: dict) -> None:
         graf << Edge(color=TELEM, style="dotted") << loki
         graf << Edge(color=TELEM, style="dotted") << prom
 
-        # 운영·팀원 접근 — 인그레스를 지나지 않는다
-        team >> Edge(color=OPS, style="dotted", label="port-forward 15432") >> pg
-        team >> Edge(color=OPS, style="dotted") >> pg_d
-        team >> Edge(color=OPS, style="dotted", label="port-forward 3001") >> graf
+        # DB는 CIDR allowlist + 최소권한 RBAC로 API port-forward. Grafana는 승인 사용자 OAuth.
+        team >> Edge(color=OPS, style="dotted", label="제한 kubeconfig") >> api
+        api >> Edge(color=OPS, style="dotted", label="RBAC port-forward") >> pg
+        api >> Edge(color=OPS, style="dotted") >> pg_d
+        team >> Edge(color=OPS, style="dotted", label="HTTPS · Google OAuth") >> traefik
+        traefik >> Edge(color=OPS, style="dotted") >> graf_ing >> Edge(color=OPS, style="dotted") >> graf
 
         backup >> Edge(color=OPS, label="pg_dump 매일") >> s3
 

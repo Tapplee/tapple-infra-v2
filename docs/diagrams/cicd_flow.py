@@ -45,9 +45,8 @@ def build(theme: dict) -> None:
         with Cluster("tapple-infra-v2  (public)", graph_attr=ca):
             repo_infra = Github("values.yaml (prod)\nvalues-dev.yaml (dev)")
 
-        argo = Argocd("ArgoCD")
-
-        with Cluster("k3s  ·  VPS 1대", graph_attr=ca):
+        with Cluster("IDC 물리 서버 1대  ·  k3s", graph_attr=ca):
+            argo = Argocd("ArgoCD")
             with Cluster("ns app", graph_attr=ca):
                 prod = Deployment("tapple-server\nprod,otel,k3s")
             with Cluster("ns dev-app", graph_attr=ca):
