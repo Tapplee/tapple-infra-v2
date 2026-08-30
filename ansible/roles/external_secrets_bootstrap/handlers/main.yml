@@ -1,0 +1,29 @@
+---
+- name: Restart the External Secrets controller
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - rollout
+      - restart
+      - deployment/external-secrets
+      - -n
+      - "{{ external_secrets_bootstrap_namespace }}"
+  when: external_secrets_bootstrap_controller.rc == 0
+  changed_when: true
+  listen: Restart External Secrets after AWS credential rotation
+
+- name: Wait for the restarted External Secrets controller
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - rollout
+      - status
+      - deployment/external-secrets
+      - -n
+      - "{{ external_secrets_bootstrap_namespace }}"
+      - --timeout=300s
+  when: external_secrets_bootstrap_controller.rc == 0
+  changed_when: false
+  listen: Restart External Secrets after AWS credential rotation

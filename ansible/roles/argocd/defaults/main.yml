@@ -1,0 +1,8 @@
+---
+argocd_version: v3.5.0
+argocd_namespace: argocd
+argocd_install_manifest_url: >-
+  https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
+argocd_install_manifest_checksum: sha256:a32bf36a437071a1f563ebf9e81c8a39fba9057c17db7d5d041afb7b6e3f4afe
+argocd_health_manifest_path: "{{ playbook_dir }}/../../manifests/cluster/argocd-health.yaml"
+argocd_root_app_manifest_path: "{{ playbook_dir }}/../../bootstrap/root-app.yaml"

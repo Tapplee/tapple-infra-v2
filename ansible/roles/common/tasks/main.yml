@@ -1,0 +1,233 @@
+---
+- name: Require the supported Ubuntu host family
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == 'Debian'
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_major_version in ['22', '24']
+      - ansible_facts.architecture in ['x86_64', 'amd64']
+    fail_msg: This bootstrap supports only x86_64 Ubuntu 22.04 or 24.04 hosts.
+
+- name: Install host prerequisites
+  ansible.builtin.apt:
+    name: "{{ common_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Link the host timezone data
+  ansible.builtin.file:
+    path: /etc/localtime
+    src: "/usr/share/zoneinfo/{{ common_tapple_timezone }}"
+    state: link
+    force: true
+    owner: root
+    group: root
+
+- name: Persist the host timezone name
+  ansible.builtin.copy:
+    content: "{{ common_tapple_timezone }}\n"
+    dest: /etc/timezone
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Inspect active swap devices
+  ansible.builtin.command: swapon --show --noheadings
+  register: common_active_swap
+  changed_when: false
+
+- name: Disable active swap
+  ansible.builtin.command: swapoff --all
+  when: common_active_swap.stdout | trim | length > 0
+  changed_when: true
+
+- name: Disable swap entries at boot
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^(\s*[^#\n]+\s+[^#\n]+\s+swap\s+.*)$'
+    replace: '# \1'
+
+- name: Load Kubernetes kernel modules at boot
+  ansible.builtin.template:
+    src: k3s-modules.conf.j2
+    dest: /etc/modules-load.d/k3s.conf
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Load Kubernetes kernel modules now
+  ansible.builtin.command: "modprobe {{ item }}"
+  loop:
+    - overlay
+    - br_netfilter
+  changed_when: false
+
+- name: Configure Kubernetes kernel parameters
+  ansible.builtin.template:
+    src: k3s-sysctl.conf.j2
+    dest: /etc/sysctl.d/90-k3s.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Apply Kubernetes kernel parameters
+
+- name: Allow SSH only from administrator networks
+  ansible.builtin.command:
+    argv:
+      - ufw
+      - allow
+      - from
+      - "{{ item }}"
+      - to
+      - any
+      - port
+      - '22'
+      - proto
+      - tcp
+      - comment
+      - tapple-admin-ssh
+  loop: "{{ common_admin_ssh_cidrs }}"
+  register: common_ssh_ufw_rules
+  changed_when: "'Rule added' in common_ssh_ufw_rules.stdout"
+
+- name: Allow the Kubernetes API only from approved team or VPN networks
+  ansible.builtin.command:
+    argv:
+      - ufw
+      - allow
+      - from
+      - "{{ item }}"
+      - to
+      - any
+      - port
+      - '6443'
+      - proto
+      - tcp
+      - comment
+      - tapple-k3s-api
+  loop: "{{ common_k3s_api_cidrs }}"
+  register: common_k3s_api_ufw_rules
+  changed_when: "'Rule added' in common_k3s_api_ufw_rules.stdout"
+
+- name: Allow public HTTP and HTTPS traffic
+  ansible.builtin.command:
+    argv:
+      - ufw
+      - allow
+      - "{{ item }}/tcp"
+      - comment
+      - tapple-public
+  loop: "{{ common_public_tcp_ports }}"
+  register: common_public_ufw_rules
+  changed_when: "'Rule added' in common_public_ufw_rules.stdout"
+
+- name: Allow the K3s pod and service networks on the node
+  ansible.builtin.command:
+    argv:
+      - ufw
+      - allow
+      - from
+      - "{{ item }}"
+      - to
+      - any
+      - comment
+      - k3s-internal
+  loop:
+    - "{{ common_k3s_cluster_cidr }}"
+    - "{{ common_k3s_service_cidr }}"
+  register: common_internal_ufw_rules
+  changed_when: "'Rule added' in common_internal_ufw_rules.stdout"
+
+- name: Inspect the effective UFW defaults
+  ansible.builtin.command: ufw status verbose
+  register: common_ufw_defaults
+  changed_when: false
+
+- name: Deny incoming traffic by default
+  ansible.builtin.command: ufw default deny incoming
+  when: "'deny (incoming)' not in common_ufw_defaults.stdout"
+  changed_when: true
+
+- name: Allow outgoing traffic by default
+  ansible.builtin.command: ufw default allow outgoing
+  when: "'allow (outgoing)' not in common_ufw_defaults.stdout"
+  changed_when: true
+
+- name: Inspect UFW state
+  ansible.builtin.command: ufw status
+  register: common_ufw_status
+  changed_when: false
+
+- name: Enable UFW after the SSH allowlist exists
+  ansible.builtin.command: ufw --force enable
+  when: "'Status: inactive' in common_ufw_status.stdout"
+  changed_when: true
+
+- name: Read the effective UFW rules
+  ansible.builtin.command: ufw status verbose
+  register: common_effective_ufw_status
+  changed_when: false
+
+- name: Verify the required K3s firewall boundaries
+  ansible.builtin.assert:
+    that:
+      - "'Status: active' in common_effective_ufw_status.stdout"
+      - "'deny (incoming)' in common_effective_ufw_status.stdout"
+      - "'allow (outgoing)' in common_effective_ufw_status.stdout"
+      - common_k3s_cluster_cidr in common_effective_ufw_status.stdout
+      - common_k3s_service_cidr in common_effective_ufw_status.stdout
+      - >-
+        common_effective_ufw_status.stdout_lines
+        | select('match', '^22(?:/tcp)?(?: \\(v6\\))?\\s+ALLOW\\s+Anywhere')
+        | list | length == 0
+      - >-
+        common_effective_ufw_status.stdout_lines
+        | select('match', '^6443(?:/tcp)?(?: \\(v6\\))?\\s+ALLOW\\s+Anywhere')
+        | list | length == 0
+    fail_msg: >-
+      UFW must be active, allow both internal K3s CIDRs, and never expose SSH
+      or the Kubernetes API to Anywhere. Use explicit CIDRs only.
+
+- name: Verify every administrator SSH network is allowed
+  ansible.builtin.assert:
+    that:
+      - item in common_effective_ufw_status.stdout
+  loop: "{{ common_admin_ssh_cidrs }}"
+
+- name: Verify every approved Kubernetes API network is allowed
+  ansible.builtin.assert:
+    that:
+      - item in common_effective_ufw_status.stdout
+  loop: "{{ common_k3s_api_cidrs }}"
+
+- name: Ensure the OpenSSH drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Enforce key-only SSH authentication
+  ansible.builtin.template:
+    src: ssh-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/00-tapple-hardening.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Validate and reload SSH
+
+- name: Check for cloud-init configuration
+  ansible.builtin.stat:
+    path: /etc/cloud/cloud.cfg.d
+  register: common_cloud_config_dir
+
+- name: Prevent cloud-init from restoring SSH password login
+  ansible.builtin.copy:
+    content: "ssh_pwauth: false\n"
+    dest: /etc/cloud/cloud.cfg.d/99-disable-pwauth.cfg
+    owner: root
+    group: root
+    mode: '0644'
+  when: common_cloud_config_dir.stat.isdir | default(false)

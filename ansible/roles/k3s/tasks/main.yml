@@ -1,0 +1,96 @@
+---
+- name: Ensure the K3s configuration directory exists
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Configure the pinned single-node K3s server
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: '0600'
+  notify: Restart K3s
+
+- name: Ensure the local source directory exists
+  ansible.builtin.file:
+    path: /usr/local/src
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Download the K3s installer
+  ansible.builtin.get_url:
+    url: "{{ k3s_install_script_url }}"
+    dest: /usr/local/src/k3s-install.sh
+    owner: root
+    group: root
+    mode: '0755'
+    checksum: "{{ k3s_install_script_checksum if k3s_install_script_checksum | length > 0 else omit }}"
+
+- name: Inspect the installed K3s version
+  ansible.builtin.command: /usr/local/bin/k3s --version
+  register: k3s_installed_version
+  changed_when: false
+  failed_when: false
+
+- name: Install or upgrade the pinned K3s version
+  ansible.builtin.command: /usr/local/src/k3s-install.sh
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    INSTALL_K3S_EXEC: server
+  when: k3s_version not in k3s_installed_version.stdout
+  changed_when: true
+
+- name: Ensure K3s starts at boot
+  ansible.builtin.systemd_service:
+    name: k3s
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply K3s configuration changes before readiness checks
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the Kubernetes API
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 6443
+    timeout: 300
+
+- name: Wait for the single node to become Ready
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - wait
+      - --for=condition=Ready
+      - node
+      - --all
+      - "--timeout={{ k3s_ready_timeout }}"
+  changed_when: false
+
+- name: Verify Kubernetes Secret encryption at rest is enabled
+  ansible.builtin.command: /usr/local/bin/k3s secrets-encrypt status
+  register: k3s_encryption_status
+  changed_when: false
+  failed_when: >-
+    k3s_encryption_status.rc != 0 or
+    'Enabled' not in k3s_encryption_status.stdout
+
+- name: Inspect the administrator kubeconfig permissions
+  ansible.builtin.stat:
+    path: "{{ k3s_kubeconfig_path }}"
+  register: k3s_kubeconfig
+
+- name: Require a root-only administrator kubeconfig
+  ansible.builtin.assert:
+    that:
+      - k3s_kubeconfig.stat.exists
+      - k3s_kubeconfig.stat.pw_name == 'root'
+      - k3s_kubeconfig.stat.mode == '0600'

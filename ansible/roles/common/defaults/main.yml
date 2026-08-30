@@ -1,0 +1,18 @@
+---
+common_tapple_timezone: Asia/Seoul
+
+common_packages:
+  - ca-certificates
+  - curl
+  - ufw
+
+common_admin_ssh_cidrs: []
+# 팀원 kubeconfig/port-forward가 필요할 때만 고정 egress 또는 VPN CIDR를 넣는다.
+# 빈 목록이면 Kubernetes API 6443은 외부에서 접근할 수 없다.
+common_k3s_api_cidrs: []
+common_public_tcp_ports:
+  - 80
+  - 443
+
+common_k3s_cluster_cidr: "{{ k3s_cluster_cidr | default('10.42.0.0/16') }}"
+common_k3s_service_cidr: "{{ k3s_service_cidr | default('10.43.0.0/16') }}"

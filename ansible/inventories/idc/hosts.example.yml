@@ -1,0 +1,17 @@
+---
+all:
+  children:
+    k3s_servers:
+      hosts:
+        tapple-idc-01:
+          # Copy this file to hosts.yml, then replace both CHANGE_ME values.
+          ansible_host: CHANGE_ME_IDC_SERVER_IP
+          ansible_user: CHANGE_ME_SSH_USER
+      vars:
+        # Prevents an example inventory from modifying a real host by accident.
+        bootstrap_confirm: false
+        common_admin_ssh_cidrs:
+          - CHANGE_ME_ADMIN_PUBLIC_IP/32
+        # Optional: fixed team/VPN egress CIDRs for restricted kubeconfig access.
+        # Keep empty when everyone operates kubectl through SSH on the node.
+        common_k3s_api_cidrs: []

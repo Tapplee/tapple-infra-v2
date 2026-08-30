@@ -1,0 +1,9 @@
+---
+external_secrets_bootstrap_namespace: external-secrets
+external_secrets_bootstrap_secret_name: aws-bootstrap
+
+# The controller environment may provide ESO_AWS_ACCESS_KEY_ID and
+# ESO_AWS_SECRET_ACCESS_KEY. If both variables below and the environment are
+# empty, the role prompts without echoing input.
+external_secrets_bootstrap_aws_access_key_id: ''
+external_secrets_bootstrap_aws_secret_access_key: ''

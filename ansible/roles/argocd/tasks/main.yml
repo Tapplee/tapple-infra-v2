@@ -1,0 +1,129 @@
+---
+- name: Ensure the Argo CD namespace exists
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - apply
+      - --field-manager=tapple-ansible-bootstrap
+      - -f
+      - '-'
+    stdin: >-
+      {{ {'apiVersion': 'v1', 'kind': 'Namespace',
+          'metadata': {'name': argocd_namespace}} | to_json }}
+  register: argocd_namespace_apply
+  changed_when: "'created' in argocd_namespace_apply.stdout"
+
+- name: Ensure the bootstrap artifact directory exists
+  ansible.builtin.file:
+    path: /var/lib/tapple/bootstrap
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Download the pinned Argo CD install manifest
+  ansible.builtin.get_url:
+    url: "{{ argocd_install_manifest_url }}"
+    dest: "/var/lib/tapple/bootstrap/argocd-install-{{ argocd_version }}.yaml"
+    owner: root
+    group: root
+    mode: '0600'
+    checksum: "{{ argocd_install_manifest_checksum }}"
+
+- name: Compare the installed Argo CD resources with the pinned manifest
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - diff
+      - --server-side=true
+      - --force-conflicts
+      - --field-manager=tapple-ansible-argocd-install
+      - -n
+      - "{{ argocd_namespace }}"
+      - -f
+      - "/var/lib/tapple/bootstrap/argocd-install-{{ argocd_version }}.yaml"
+  register: argocd_manifest_diff
+  changed_when: false
+  failed_when: argocd_manifest_diff.rc not in [0, 1]
+
+- name: Reconcile Argo CD when the pinned manifest differs
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - apply
+      - --server-side=true
+      - --force-conflicts
+      - --field-manager=tapple-ansible-argocd-install
+      - -n
+      - "{{ argocd_namespace }}"
+      - -f
+      - "/var/lib/tapple/bootstrap/argocd-install-{{ argocd_version }}.yaml"
+  when: argocd_manifest_diff.rc == 1
+  changed_when: true
+
+- name: Compare the Argo CD health gates with Git
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - diff
+      - --server-side=true
+      - --force-conflicts
+      - --field-manager=tapple-ansible-argocd-health
+      - -n
+      - "{{ argocd_namespace }}"
+      - -f
+      - '-'
+    stdin: "{{ lookup('ansible.builtin.file', argocd_health_manifest_path) }}"
+  register: argocd_health_manifest_diff
+  changed_when: false
+  failed_when: argocd_health_manifest_diff.rc not in [0, 1]
+
+- name: Reconcile the Argo CD health gates before the root Application
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - apply
+      - --server-side=true
+      - --force-conflicts
+      - --field-manager=tapple-ansible-argocd-health
+      - -n
+      - "{{ argocd_namespace }}"
+      - -f
+      - '-'
+    stdin: "{{ lookup('ansible.builtin.file', argocd_health_manifest_path) }}"
+  when: argocd_health_manifest_diff.rc == 1
+  changed_when: true
+
+- name: Wait for the Argo CD deployments
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - rollout
+      - status
+      - "deployment/{{ item }}"
+      - -n
+      - "{{ argocd_namespace }}"
+      - --timeout=420s
+  loop:
+    - argocd-repo-server
+    - argocd-server
+  changed_when: false
+
+- name: Wait for the Argo CD application controller
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - rollout
+      - status
+      - statefulset/argocd-application-controller
+      - -n
+      - "{{ argocd_namespace }}"
+      - --timeout=420s
+  changed_when: false

@@ -1,0 +1,35 @@
+---
+- name: Compare the root Application with Git
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - diff
+      - --server-side=true
+      - --force-conflicts
+      - --field-manager=tapple-ansible-root-app
+      - -n
+      - "{{ argocd_namespace }}"
+      - -f
+      - '-'
+    stdin: "{{ lookup('ansible.builtin.file', argocd_root_app_manifest_path) }}"
+  register: argocd_root_app_diff
+  changed_when: false
+  failed_when: argocd_root_app_diff.rc not in [0, 1]
+
+- name: Reconcile the root Application when it differs
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - apply
+      - --server-side=true
+      - --force-conflicts
+      - --field-manager=tapple-ansible-root-app
+      - -n
+      - "{{ argocd_namespace }}"
+      - -f
+      - '-'
+    stdin: "{{ lookup('ansible.builtin.file', argocd_root_app_manifest_path) }}"
+  when: argocd_root_app_diff.rc == 1
+  changed_when: true

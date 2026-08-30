@@ -1,0 +1,44 @@
+---
+- name: Bootstrap the Tapple single-node IDC cluster
+  hosts: k3s_servers
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  serial: 1
+  environment:
+    LC_ALL: C
+
+  pre_tasks:
+    - name: Refuse an unreviewed or placeholder inventory
+      ansible.builtin.assert:
+        that:
+          - bootstrap_confirm | default(false) | bool
+          - groups.get('k3s_servers', []) | length == 1
+          - ansible_host is defined
+          - "'CHANGE_ME' not in ansible_host"
+          - ansible_user is defined
+          - "'CHANGE_ME' not in ansible_user"
+          - common_admin_ssh_cidrs | default([]) | length > 0
+          - "'CHANGE_ME' not in (common_admin_ssh_cidrs | join(','))"
+        fail_msg: >-
+          Copy inventories/idc/hosts.example.yml to hosts.yml, replace every
+          CHANGE_ME value, review the SSH allowlist, and set bootstrap_confirm=true.
+      delegate_to: localhost
+      become: false
+      tags:
+        - preflight
+
+    - name: Gather host facts after the local safety check
+      ansible.builtin.setup:
+
+  roles:
+    - role: common
+    - role: k3s
+    - role: argocd
+    - role: external_secrets_bootstrap
+
+  post_tasks:
+    - name: Reconcile the root Application after secret-zero exists
+      ansible.builtin.include_role:
+        name: argocd
+        tasks_from: root_app.yml
