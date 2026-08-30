@@ -21,7 +21,7 @@ spec:
         fullnameOverride: grafana
         image:
           tag: 13.0.1 # compose와 동일
-        # secrets/grafana-admin.yaml (SealedSecret, monitoring 네임스페이스)
+        # Secrets Manager /tapple/platform/monitoring/grafana-admin → ExternalSecret/grafana-admin
         admin:
           existingSecret: grafana-admin
           userKey: admin-user
@@ -97,7 +97,7 @@ spec:
         # cert-manager 도 Let's Encrypt 도 필요 없다 — A 레코드 하나로 끝난다.
         #
         # 남은 사람 작업:
-        #   Cloudflare DNS →  grafana-k3s   A   141.164.40.139   [Proxied 🟠]
+        #   Cloudflare DNS →  grafana-k3s   A   <IDC_PUBLIC_IP>   [Proxied 🟠]
         #
         # 이름을 grafana 가 아니라 grafana-k3s 로 둔 이유: 와일드카드 때문에
         # grafana.tapple.co.kr 이 이미 홈서버로 응답한다(실측 HTTP 200). 겹치면 헷갈린다.
@@ -140,7 +140,7 @@ spec:
             #   ① Cloudflare A 레코드 (위 참고)
             #   ② Google Cloud Console → 승인된 리다이렉트 URI 추가
             #        https://grafana-k3s.tapple.co.kr/login/google
-            #   ③ Actions → Seal secrets → target: grafana-oauth
+            #   ③ Secrets Manager의 grafana-google-oauth JSON Secret 등록 후 ESO Ready 확인
             enabled: false # ← 여기만 true 로
             scopes: openid email profile
             # 핵심 — 이미 등록된 사용자만 로그인된다. 구글은 "누구인지"만 증명하고

@@ -1,0 +1,249 @@
+# AWS 계정 ID는 비밀이 아니다. 배포 전에 실제 12자리 값으로 채운다.
+# 빈 값이면 Helm 렌더가 즉시 실패해, 역할 분리 없이 잘못 배포되는 것을 막는다.
+aws:
+  accountId: ""
+  partition: aws
+  region: ap-northeast-2
+
+# 시간당 한 번 자동 반영. 즉시 반영은 ExternalSecret force-sync annotation을 사용한다.
+refreshInterval: 1h
+
+# SecretStore 자체를 namespace 안에 두고 prefix + IAM role을 함께 건다.
+# 같은 역할을 쓰는 namespace도 STS session tag의 esoNamespace로 trust policy에서 제한한다.
+stores:
+  - name: aws-secretsmanager
+    namespace: app
+    role: tapple-secrets-prod
+    prefix: /tapple/prod/
+  - name: aws-secretsmanager
+    namespace: db
+    role: tapple-secrets-prod
+    prefix: /tapple/prod/
+  - name: aws-secretsmanager
+    namespace: dev-app
+    role: tapple-secrets-dev
+    prefix: /tapple/dev/
+  - name: aws-secretsmanager
+    namespace: dev-db
+    role: tapple-secrets-dev
+    prefix: /tapple/dev/
+  - name: aws-secretsmanager
+    namespace: preview
+    role: tapple-secrets-preview
+    prefix: /tapple/preview/
+  - name: aws-secretsmanager
+    namespace: monitoring
+    role: tapple-secrets-monitoring
+    prefix: /tapple/platform/monitoring/
+  - name: aws-secretsmanager
+    namespace: argocd
+    role: tapple-secrets-argocd
+    prefix: /tapple/platform/argocd/
+  - name: aws-secretsmanager-shared
+    namespace: app
+    role: tapple-secrets-shared
+    prefix: /tapple/shared/
+  - name: aws-secretsmanager-shared
+    namespace: dev-app
+    role: tapple-secrets-shared
+    prefix: /tapple/shared/
+  - name: aws-secretsmanager-shared
+    namespace: preview
+    role: tapple-secrets-shared
+    prefix: /tapple/shared/
+
+# AWS Secrets Manager에는 ExternalSecret마다 JSON Secret 하나를 둔다.
+# Store prefix + remoteKey가 실제 이름이다. 예: /tapple/prod/ + app-secrets.
+# data는 Kubernetes Secret key → JSON property를 명시해 예상하지 않은 property 유입을 막는다.
+externalSecrets:
+  - name: app-secrets
+    namespace: app
+    store: aws-secretsmanager
+    targetName: app-secrets
+    remoteKey: app-secrets
+    data: &appData
+      CORS_ALLOWED_ORIGINS: CORS_ALLOWED_ORIGINS
+      DISCORD_ERRORS_ID: DISCORD_ERRORS_ID
+      DISCORD_ERRORS_TOKEN: DISCORD_ERRORS_TOKEN
+      DISCORD_NOTIFY_ID: DISCORD_NOTIFY_ID
+      DISCORD_NOTIFY_TOKEN: DISCORD_NOTIFY_TOKEN
+      FRONTEND_GOOGLE_COMPLETE_URI: FRONTEND_GOOGLE_COMPLETE_URI
+      GOOGLE_CLIENT_ID: GOOGLE_CLIENT_ID
+      GOOGLE_CLIENT_SECRET: GOOGLE_CLIENT_SECRET
+      GOOGLE_REDIRECT_URI: GOOGLE_REDIRECT_URI
+      HIBERNATE_SHOW_SQL: HIBERNATE_SHOW_SQL
+      HIKARI_MAX_POOL_SIZE: HIKARI_MAX_POOL_SIZE
+      HIKARI_MIN_IDLE: HIKARI_MIN_IDLE
+      JWT_ACCESS_EXPIRATION: JWT_ACCESS_EXPIRATION
+      JWT_REFRESH_EXPIRATION: JWT_REFRESH_EXPIRATION
+      JWT_SECRET_KEY: JWT_SECRET_KEY
+      OTEL_AUTH_HEADER: OTEL_AUTH_HEADER
+      OTEL_TRACE_SAMPLE: OTEL_TRACE_SAMPLE
+      POSTGRES_PASSWORD: POSTGRES_PASSWORD
+      POSTGRES_USERNAME: POSTGRES_USERNAME
+      PUBLIC_API_ORIGIN: PUBLIC_API_ORIGIN
+      PUBLIC_ASSET_ORIGIN: PUBLIC_ASSET_ORIGIN
+      PUBLIC_MEDIA_ORIGIN: PUBLIC_MEDIA_ORIGIN
+      PUBLIC_SITE_ORIGIN: PUBLIC_SITE_ORIGIN
+      REFRESH_COOKIE_SAME_SITE: REFRESH_COOKIE_SAME_SITE
+      REFRESH_COOKIE_SECURE: REFRESH_COOKIE_SECURE
+      S3_ACCESS_KEY: S3_ACCESS_KEY
+      S3_BUCKET_NAME: S3_BUCKET_NAME
+      S3_REGION: S3_REGION
+      S3_SECRET_KEY: S3_SECRET_KEY
+      SHARE_PREVIEW_LOG_HMAC_KEY: SHARE_PREVIEW_LOG_HMAC_KEY
+      SHARE_PREVIEW_PREVIOUS_SERVICE_TOKEN: SHARE_PREVIEW_PREVIOUS_SERVICE_TOKEN
+      SHARE_PREVIEW_SERVICE_TOKEN: SHARE_PREVIEW_SERVICE_TOKEN
+      SLUG_RESERVATION_HMAC_KEY: SLUG_RESERVATION_HMAC_KEY
+      SLUG_RESERVATION_HMAC_KEY_VERSION: SLUG_RESERVATION_HMAC_KEY_VERSION
+      SWAGGER_REDIRECT_URI: SWAGGER_REDIRECT_URI
+
+  - name: app-secrets
+    namespace: dev-app
+    store: aws-secretsmanager
+    targetName: app-secrets
+    remoteKey: app-secrets
+    data: *appData
+
+  - name: app-secrets
+    namespace: preview
+    store: aws-secretsmanager
+    targetName: app-secrets
+    remoteKey: app-secrets
+    data:
+      DISCORD_ERRORS_ID: DISCORD_ERRORS_ID
+      DISCORD_ERRORS_TOKEN: DISCORD_ERRORS_TOKEN
+      DISCORD_NOTIFY_ID: DISCORD_NOTIFY_ID
+      DISCORD_NOTIFY_TOKEN: DISCORD_NOTIFY_TOKEN
+      GOOGLE_CLIENT_ID: GOOGLE_CLIENT_ID
+      GOOGLE_CLIENT_SECRET: GOOGLE_CLIENT_SECRET
+      HIBERNATE_SHOW_SQL: HIBERNATE_SHOW_SQL
+      HIKARI_MAX_POOL_SIZE: HIKARI_MAX_POOL_SIZE
+      HIKARI_MIN_IDLE: HIKARI_MIN_IDLE
+      JWT_ACCESS_EXPIRATION: JWT_ACCESS_EXPIRATION
+      JWT_REFRESH_EXPIRATION: JWT_REFRESH_EXPIRATION
+      JWT_SECRET_KEY: JWT_SECRET_KEY
+      OTEL_AUTH_HEADER: OTEL_AUTH_HEADER
+      OTEL_TRACE_SAMPLE: OTEL_TRACE_SAMPLE
+      POSTGRES_PASSWORD: POSTGRES_PASSWORD
+      POSTGRES_USERNAME: POSTGRES_USERNAME
+      REFRESH_COOKIE_SAME_SITE: REFRESH_COOKIE_SAME_SITE
+      REFRESH_COOKIE_SECURE: REFRESH_COOKIE_SECURE
+      S3_ACCESS_KEY: S3_ACCESS_KEY
+      S3_BUCKET_NAME: S3_BUCKET_NAME
+      S3_REGION: S3_REGION
+      S3_SECRET_KEY: S3_SECRET_KEY
+      SHARE_PREVIEW_LOG_HMAC_KEY: SHARE_PREVIEW_LOG_HMAC_KEY
+      SHARE_PREVIEW_PREVIOUS_SERVICE_TOKEN: SHARE_PREVIEW_PREVIOUS_SERVICE_TOKEN
+      SHARE_PREVIEW_SERVICE_TOKEN: SHARE_PREVIEW_SERVICE_TOKEN
+      SLUG_RESERVATION_HMAC_KEY: SLUG_RESERVATION_HMAC_KEY
+      SLUG_RESERVATION_HMAC_KEY_VERSION: SLUG_RESERVATION_HMAC_KEY_VERSION
+
+  - name: postgres-secrets
+    namespace: db
+    store: aws-secretsmanager
+    targetName: postgres-secrets
+    remoteKey: postgres-secrets
+    data:
+      POSTGRES_DB: POSTGRES_DB
+      POSTGRES_PASSWORD: POSTGRES_PASSWORD
+      POSTGRES_USER: POSTGRES_USER
+
+  - name: postgres-readonly
+    namespace: db
+    store: aws-secretsmanager
+    targetName: postgres-readonly
+    remoteKey: postgres-readonly
+    data:
+      RO_PASSWORD: RO_PASSWORD
+
+  - name: backup-s3
+    namespace: db
+    store: aws-secretsmanager
+    targetName: backup-s3
+    remoteKey: backup-s3
+    data:
+      AWS_ACCESS_KEY_ID: AWS_ACCESS_KEY_ID
+      AWS_SECRET_ACCESS_KEY: AWS_SECRET_ACCESS_KEY
+      S3_BUCKET: S3_BUCKET
+      S3_ENDPOINT: S3_ENDPOINT
+
+  - name: postgres-secrets
+    namespace: dev-db
+    store: aws-secretsmanager
+    targetName: postgres-secrets
+    remoteKey: postgres-secrets
+    data:
+      POSTGRES_DB: POSTGRES_DB
+      POSTGRES_PASSWORD: POSTGRES_PASSWORD
+      POSTGRES_USER: POSTGRES_USER
+
+  - name: postgres-preview-secrets
+    namespace: preview
+    store: aws-secretsmanager
+    targetName: postgres-preview-secrets
+    remoteKey: postgres-preview-secrets
+    data:
+      POSTGRES_PASSWORD: POSTGRES_PASSWORD
+      POSTGRES_USER: POSTGRES_USER
+
+  - name: ghcr-pull
+    namespace: app
+    store: aws-secretsmanager-shared
+    targetName: ghcr-pull
+    remoteKey: ghcr-pull
+    type: kubernetes.io/dockerconfigjson
+    data:
+      .dockerconfigjson: dockerconfigjson
+
+  - name: ghcr-pull
+    namespace: dev-app
+    store: aws-secretsmanager-shared
+    targetName: ghcr-pull
+    remoteKey: ghcr-pull
+    type: kubernetes.io/dockerconfigjson
+    data:
+      .dockerconfigjson: dockerconfigjson
+
+  - name: ghcr-pull
+    namespace: preview
+    store: aws-secretsmanager-shared
+    targetName: ghcr-pull
+    remoteKey: ghcr-pull
+    type: kubernetes.io/dockerconfigjson
+    data:
+      .dockerconfigjson: dockerconfigjson
+
+  - name: grafana-admin
+    namespace: monitoring
+    store: aws-secretsmanager
+    targetName: grafana-admin
+    remoteKey: grafana-admin
+    data:
+      admin-password: admin-password
+      admin-user: admin-user
+
+  - name: grafana-google-oauth
+    namespace: monitoring
+    store: aws-secretsmanager
+    targetName: grafana-google-oauth
+    remoteKey: grafana-google-oauth
+    data:
+      client-id: client-id
+      client-secret: client-secret
+
+  - name: alertmanager-discord
+    namespace: monitoring
+    store: aws-secretsmanager
+    targetName: alertmanager-discord
+    remoteKey: alertmanager-discord
+    data:
+      discord-webhook: discord-webhook
+
+  - name: preview-github-token
+    namespace: argocd
+    store: aws-secretsmanager
+    targetName: preview-github-token
+    remoteKey: preview-github-token
+    data:
+      token: token

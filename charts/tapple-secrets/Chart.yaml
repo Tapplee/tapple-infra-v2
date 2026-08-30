@@ -1,0 +1,6 @@
+apiVersion: v2
+name: tapple-secrets
+description: AWS Secrets Manager contracts for tapple Kubernetes Secrets
+type: application
+version: 0.2.0
+appVersion: "2"

@@ -20,7 +20,7 @@ image:
   tag: "f6e142155b80"
   pullPolicy: IfNotPresent
 
-# ghcr private pull용 시크릿 (secrets/ghcr-pull.yaml, app 네임스페이스)
+# ghcr private pull용 시크릿 (Secrets Manager /tapple/shared/ghcr-pull → ESO)
 imagePullSecrets:
   - name: ghcr-pull
 
@@ -35,9 +35,8 @@ service:
 ingress:
   enabled: true
   className: traefik # k3s 내장 Traefik
-  # 임시 VPS 테스트용 — nip.io는 <ip>.nip.io를 그 IP로 해석해주는 공용 와일드카드 DNS.
-  # TODO: iwinv 컷오버 시 실도메인으로 이 한 줄만 교체 (api.taple.co.kr 등)
-  host: api.141.164.40.139.nip.io
+  # 운영 전 fail-safe placeholder. IDC DNS/TLS 확정 뒤 실제 1단 host로 교체한다.
+  host: api.example.invalid
   # Cloudflare origin cert 시크릿 (실도메인 붙일 때 생성)
   tls: []
   # - secretName: cloudflare-origin-cert
@@ -74,7 +73,8 @@ env:
   # OTLP 게이트웨이 — 메트릭·트레이스·로그 전부 여기로 push (scrape 아님)
   OTEL_URL: http://otel-collector.monitoring.svc.cluster.local:4318
 
-# POSTGRES_USERNAME / POSTGRES_PASSWORD / JWT_SECRET_KEY / OTEL_AUTH_HEADER 등 (secrets/app-secrets.yaml)
+# POSTGRES_USERNAME / POSTGRES_PASSWORD / JWT_SECRET_KEY / OTEL_AUTH_HEADER 등
+# (환경별 Secrets Manager JSON Secret → ESO)
 existingSecret: app-secrets
 
 # PR 프리뷰만 켠다. 프리뷰는 postgres 한 대를 공유하고 PR 마다 database 를 나누는데,

@@ -37,7 +37,7 @@ env:
   SPRING_PROFILES_ACTIVE: dev,otel,k3s
   OTEL_URL: http://otel-collector.monitoring.svc.cluster.local:4318
 
-# 프리뷰 전용 시크릿. dev 값을 복제해 씰링한다 (secrets/preview-app-secrets.yaml).
+# 프리뷰 전용 시크릿. /tapple/preview 경로에서 ESO가 동기화한다.
 # prod 자격증명을 프리뷰에 쓰지 않는다 — 프리뷰는 URL 을 아는 사람이면 누구나 접근한다.
 existingSecret: app-secrets
 

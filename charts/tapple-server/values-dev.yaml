@@ -8,8 +8,8 @@ image:
 
 ingress:
   enabled: true
-  # TODO: iwinv 컷오버 시 실도메인으로 교체 (dev-api.taple.co.kr 등)
-  host: dev-api.141.164.40.139.nip.io
+  # 운영 전 fail-safe placeholder. IDC DNS/TLS 확정 뒤 실제 dev host로 교체한다.
+  host: dev-api.example.invalid
 
 # prod의 1/2. 압박 시 가장 먼저 축출되도록 우선순위도 최하
 # requests는 낮게(자리만 확보), limits는 넉넉히 — 유휴 CPU는 어차피 놀고 있다

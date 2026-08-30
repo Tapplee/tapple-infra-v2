@@ -1,4 +1,4 @@
-# pg_dump → iwinv 오브젝트 스토리지 (계획 D14, Phase 9)
+# pg_dump → 노드 밖 S3 호환 오브젝트 스토리지 (계획 D14, Phase 9)
 # 매일 03:00 KST(= 18:00 UTC). 배포 직전 백업은 CI가 `kubectl create job --from=cronjob/pg-backup`으로 트리거
 apiVersion: batch/v1
 kind: CronJob
@@ -69,7 +69,7 @@ spec:
                 - name: backup
                   mountPath: /backup
           containers:
-            # 2단계: S3 호환 업로드 (iwinv 오브젝트 스토리지)
+            # 2단계: 노드와 다른 장애 영역의 S3 호환 스토리지로 업로드
             - name: upload
               image: amazon/aws-cli:2.22.35
               command: ["sh", "-c"]
@@ -80,7 +80,8 @@ spec:
                 - name: HOME
                   value: /tmp
               envFrom:
-                # secrets/backup-s3.yaml (SealedSecret): AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / S3_ENDPOINT / S3_BUCKET
+                # Secrets Manager /tapple/prod/backup-s3 JSON → ExternalSecret/backup-s3
+                # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / S3_ENDPOINT / S3_BUCKET
                 - secretRef:
                     name: backup-s3
               securityContext:

@@ -54,7 +54,7 @@ spec:
               containerPort: 5432
               protocol: TCP
           env:
-            # secrets/postgres-secrets.yaml (SealedSecret, db 네임스페이스)
+            # Secrets Manager /tapple/prod/postgres-secrets JSON → ExternalSecret/postgres-secrets (db)
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef: { name: postgres-secrets, key: POSTGRES_USER }

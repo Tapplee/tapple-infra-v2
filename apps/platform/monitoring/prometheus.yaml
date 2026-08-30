@@ -78,7 +78,7 @@ spec:
           resources:
             requests: { cpu: 20m, memory: 64Mi }
             limits: { memory: 128Mi }
-          # Discord webhook URL은 SealedSecret(alertmanager-discord)에서 파일로 마운트
+          # Discord webhook URL은 Secrets Manager에서 동기화한 Secret(alertmanager-discord)에서 마운트
           extraSecretMounts:
             - name: discord-webhook
               secretName: alertmanager-discord

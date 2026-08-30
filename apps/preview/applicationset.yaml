@@ -3,26 +3,29 @@
 # 왜 라벨 필터인가: 열린 PR 전부에 환경을 띄우면 노드 메모리가 바닥난다.
 # `preview` 라벨을 붙인 PR 만 배포한다 — 라벨이 곧 자리 예약이고, 의도를 명시하는 장치다.
 #
-# 왜 preview 네임스페이스 하나인가: SealedSecret 은 (네임스페이스, 이름)에 묶여 암호화된다.
-# PR 마다 네임스페이스를 만들면 PR 이 열릴 때마다 사람이 씰링해야 해서 자동화가 성립하지 않는다.
-# cluster-wide 스코프 씰링은 그 시크릿을 아무 네임스페이스에서나 풀 수 있게 만드는 것이라
-# 프리뷰 편의로 감수할 트레이드오프가 아니다.
+# 왜 preview 네임스페이스 하나인가: 작은 단일 노드에서 동시 프리뷰 수와 공유 DB 접근을
+# 한 경계로 통제하기 위해서다. 시크릿은 /tapple/preview 전용 IAM 역할로 prod·dev와 분리한다.
 #
 # 필요한 것
 #   - Secret preview-github-token (argocd 네임스페이스) : PR 목록 조회용 PAT.
+#     Secrets Manager /tapple/platform/argocd/preview-github-token에서 ESO가 동기화한다.
 #     tapple-be 가 private 이라 토큰 없이는 PR 을 못 읽는다. 권한은 contents:read + pull_requests:read.
 #   - tapple-be 의 cd-gitops.yml 이 라벨 붙은 PR 브랜치의 이미지를 ghcr 에 올려둬야 한다.
 #     그 이미지가 없으면 파드가 ImagePullBackOff 로 남는다.
+#   - `*.example.invalid` host는 운영 전 fail-safe placeholder다. IDC DNS/TLS 확정 뒤
+#     ingress와 URL 계열 값을 모두 같은 실제 1단 preview host 패턴으로 교체한다.
 #
 # 한계 — 구글 로그인은 프리뷰에서 동작하지 않는다.
 #   Google OAuth 는 리다이렉트 URI 를 와일드카드 없이 사전 등록해야 하고 HTTPS 만 받는다.
-#   프리뷰 URL 은 동적이고 지금은 http nip.io 다. 그래서 프리뷰는 개발자용(API·Swagger)이고,
+#   프리뷰 URL 은 동적이라 callback을 미리 열거하지 않는다. 프리뷰는 개발자용(API·Swagger)이고,
 #   로그인이 필요한 화면 확인은 실도메인+TLS 가 붙은 환경에서 한다.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
   name: tapple-server-preview
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   # PR 이 닫히면 Application 과 그 리소스를 지운다
   syncPolicy:
@@ -76,7 +79,7 @@ spec:
             - name: fullnameOverride
               value: "tapple-server-pr-{{ .number }}"
             - name: ingress.host
-              value: "pr-{{ .number }}.api.141.164.40.139.nip.io"
+              value: "pr-{{ .number }}.api.example.invalid"
             - name: createDatabase.name
               value: "tapple_pr{{ .number }}"
             - name: env.POSTGRES_URL
@@ -89,24 +92,24 @@ spec:
             # URL 계열은 PR 마다 호스트가 달라야 해서 시크릿이 아니라 여기서 채운다.
             # k8s 는 env 가 envFrom 을 덮으므로 app-secrets 에 값이 있어도 이쪽이 이긴다.
             - name: env.PUBLIC_API_ORIGIN
-              value: "http://pr-{{ .number }}.api.141.164.40.139.nip.io"
+              value: "http://pr-{{ .number }}.api.example.invalid"
             - name: env.PUBLIC_SITE_ORIGIN
-              value: "http://pr-{{ .number }}.api.141.164.40.139.nip.io"
+              value: "http://pr-{{ .number }}.api.example.invalid"
             - name: env.PUBLIC_ASSET_ORIGIN
-              value: "http://pr-{{ .number }}.api.141.164.40.139.nip.io"
+              value: "http://pr-{{ .number }}.api.example.invalid"
             - name: env.PUBLIC_MEDIA_ORIGIN
-              value: "http://pr-{{ .number }}.api.141.164.40.139.nip.io"
+              value: "http://pr-{{ .number }}.api.example.invalid"
             # FE 가 로컬에서 이 프리뷰에 붙을 수 있게 localhost 를 열어둔다
             - name: env.CORS_ALLOWED_ORIGINS
-              value: "http://pr-{{ .number }}.api.141.164.40.139.nip.io,http://localhost:3000,http://localhost:5173"
+              value: "http://pr-{{ .number }}.api.example.invalid,http://localhost:3000,http://localhost:5173"
             # 구글 로그인은 프리뷰에서 동작하지 않는다(리다이렉트 URI 사전 등록 + HTTPS 필요).
             # 값은 앱 부팅에 필요해서 채우는 것뿐이다
             - name: env.GOOGLE_REDIRECT_URI
-              value: "http://pr-{{ .number }}.api.141.164.40.139.nip.io/v1/auth/google/callback"
+              value: "http://pr-{{ .number }}.api.example.invalid/v1/auth/google/callback"
             - name: env.FRONTEND_GOOGLE_COMPLETE_URI
               value: "http://localhost:5173/auth/google/complete"
             - name: env.SWAGGER_REDIRECT_URI
-              value: "http://pr-{{ .number }}.api.141.164.40.139.nip.io/swagger-ui/oauth2-redirect.html"
+              value: "http://pr-{{ .number }}.api.example.invalid/swagger-ui/oauth2-redirect.html"
       destination:
         server: https://kubernetes.default.svc
         namespace: preview
