@@ -9,7 +9,7 @@ k3s 클러스터의 **dev·prod PostgreSQL**에 붙는 방법. 로컬 개발 DB(
 | DB명 | `tapple_dev` | `tapple` | `tapple_pr<PR번호>` |
 | 계정 | `tapple` (앱과 같은 계정) | `tapple_ro` (**조회 전용**) | `tapple` |
 | 권한 | 읽기·쓰기·DDL | `SELECT`만 | 읽기·쓰기·DDL |
-| 비밀번호 | 클러스터에서 직접 꺼낸다 | 운영자에게 요청 | 클러스터에서 직접 꺼낸다 |
+| 비밀번호 | Secret에서 psql에 직접 전달(표시 안 함) | 운영자에게 요청 | Secret에서 psql에 직접 전달(표시 안 함) |
 | 네임스페이스 | `dev-db` | `db` | `preview` |
 | 포트(권장) | 15432 | 15433 | 15434 |
 
@@ -26,8 +26,14 @@ brew install kubectl        # macOS
 
 **kubeconfig 받기** — 운영자에게 요청한다. 운영자는 노드에서 이렇게 발급한다:
 ```bash
-./scripts/gen-team-kubeconfig.sh <노드IP> > 이름-kubeconfig.yaml
+./scripts/gen-team-kubeconfig.sh <IDC_NODE_IP> > 이름-kubeconfig.yaml
 ```
+
+API `6443`은 인터넷 전체에 열려 있지 않다. 운영자는 발급 전에 팀원의 고정 egress
+또는 VPN CIDR를 `ansible/inventories/idc/hosts.yml`의 `common_k3s_api_cidrs`에 넣고
+playbook을 다시 실행한다. 개인 IP가 자주 바뀐다면 `/32`를 계속 추가하지 말고 VPN
+egress 하나로 모은다. `0.0.0.0/0`은 허용하지 않는다.
+
 받은 파일을 두고 셸에서 지정한다:
 ```bash
 mkdir -p ~/.kube && mv ~/Downloads/이름-kubeconfig.yaml ~/.kube/tapple.yaml
@@ -56,14 +62,11 @@ kubectl port-forward -n dev-db svc/postgres 15432:5432
 ```
 로컬 5432는 이미 쓰고 있을 가능성이 높아 **15432**로 받았다.
 
-**비밀번호 꺼내기** (새 터미널)
-```bash
-kubectl get secret postgres-secrets -n dev-db -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d; echo
-```
+**붙기** (새 터미널) — 비밀번호는 명령 치환 결과로 psql 프로세스에만 전달하며
+터미널이나 셸 기록에 출력하지 않는다.
 
-**붙기**
 ```bash
-psql "postgresql://tapple@localhost:15432/tapple_dev"
+PGPASSWORD="$(kubectl get secret postgres-secrets -n dev-db -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)" psql --host=localhost --port=15432 --username=tapple --dbname=tapple_dev
 ```
 GUI 도구라면:
 
@@ -73,7 +76,7 @@ GUI 도구라면:
 | Port | `15432` |
 | Database | `tapple_dev` |
 | User | `tapple` |
-| Password | 위에서 꺼낸 값 |
+| Password | 운영자가 승인된 비밀 관리 도구로 전달한 값 |
 | SSL | 끔 (터널 안이라 이미 암호화돼 있다) |
 
 터널을 닫으면(`Ctrl+C`) 연결도 끊긴다. GUI가 "connection lost"를 띄우면 터널이 죽은 것이니 다시 열면 된다.
@@ -109,11 +112,8 @@ kubectl port-forward -n preview svc/postgres-preview 15434:5432
 ```
 
 ```bash
-# 비밀번호 (프리뷰 전용으로 생성된 값 — 운영과 무관하다)
-kubectl get secret postgres-preview-secrets -n preview -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d; echo
-
-# PR #27 의 database
-psql "postgresql://tapple@localhost:15434/tapple_pr27"
+# PR #27의 database. 비밀번호는 출력하지 않고 psql 프로세스에만 전달한다.
+PGPASSWORD="$(kubectl get secret postgres-preview-secrets -n preview -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)" psql --host=localhost --port=15434 --username=tapple --dbname=tapple_pr27
 ```
 
 | 항목 | 값 |
@@ -121,7 +121,7 @@ psql "postgresql://tapple@localhost:15434/tapple_pr27"
 | Host / Port | `localhost` / `15434` |
 | Database | `tapple_pr<PR번호>` |
 | User | `tapple` |
-| Password | 위에서 꺼낸 값 |
+| Password | 운영자가 승인된 비밀 관리 도구로 전달한 값 |
 
 **dev·prod 와 달리 쓰기가 열려 있다.** 프리뷰는 버려도 되는 환경이라 마이그레이션 시험이나
 데이터 조작을 마음껏 해도 된다. 다른 PR 의 database 는 별개라 영향이 없다.
@@ -148,6 +148,10 @@ lsof -iTCP:15432 -sTCP:LISTEN
 
 **`Forbidden: User "system:serviceaccount:team-access:teammate" cannot ...`**
 권한 밖의 일을 시도했거나(예: `kubectl exec`, prod 시크릿 읽기) 토큰이 만료됐다. 의도한 작업이 막혔다면 운영자에게 말한다 — Role을 넓혀야 하는 경우일 수 있다.
+
+**`i/o timeout` 또는 `connection timed out` (kubectl 자체가 연결되지 않음)**
+현재 egress IP가 방화벽 allowlist에 없을 가능성이 높다. 운영자에게 현재 공인 IP나
+VPN 접속 상태를 확인해 달라고 한다. 인증 오류와 달리 이 경우 API 응답 자체가 없다.
 
 **`connection refused` (터널은 열려 있는데)**
 DB 파드가 재기동 중일 수 있다.
@@ -180,9 +184,9 @@ tapple-be/infrastructure/src/main/resources/db/migration/V<다음번호>__설명
 
 **kubeconfig 발급**
 ```bash
-ssh root@<노드IP>
+ssh root@<IDC_NODE_IP>
 cd /path/to/tapple-infra-v2
-./scripts/gen-team-kubeconfig.sh <노드IP> 2160h > 이름-kubeconfig.yaml   # 90일
+./scripts/gen-team-kubeconfig.sh <IDC_NODE_IP> 2160h > 이름-kubeconfig.yaml   # 90일
 ```
 파일은 안전한 경로로 전달한다(1Password 등). Slack·카톡 평문 전송은 피한다.
 
@@ -192,17 +196,105 @@ kubectl delete sa teammate -n team-access
 # ArgoCD selfHeal 이 곧 되살리므로, 되살아난 뒤 새로 발급하면 이전 토큰은 전부 무효
 ```
 
+더 이상 쓰지 않는 개인/VPN CIDR도 inventory와 UFW에서 제거한다. 현재 bootstrap role은
+안전상 기존 UFW 규칙을 자동 purge하지 않으므로, 목록에서 뺀 CIDR의 번호를 확인해
+명시적으로 삭제한 뒤 다시 상태를 검증한다.
+
+```bash
+ufw status numbered
+ufw delete <삭제할-규칙번호>
+ufw status verbose
+```
+
 **권한 범위 변경** — `manifests/cluster/team-access.yaml`을 고쳐 커밋한다. ArgoCD가 반영한다. `kubectl edit`로 직접 고치면 selfHeal이 되돌린다.
 
 **prod 읽기전용 계정** — `manifests/postgres/readonly-role-job.yaml`(추적 Job)이 만든다. `\gexec`로 idempotent하니 몇 번 돌아도 같고, 비밀번호는 매번 시크릿 값으로 동기화된다.
 
 > PostSync 훅으로도 만들어봤지만 이 클러스터에서 실행되지 않았다 — 컨트롤러가 매 sync 계획에는 `PostSync/0 hook batch/Job:db/postgres-readonly-role`로 넣으면서 실행 단계에서 `skipHooks:true`로 건너뛴다. 그래서 평범한 Job으로 되돌렸고, 그 경로는 롤을 완전히 지운 상태에서 재생성까지 실측했다.
 
-비밀번호는 `postgres-readonly` SealedSecret에 있고 이렇게 꺼낸다:
+비밀번호 원본은 AWS Secrets Manager의 JSON Secret
+`/tapple/prod/postgres-readonly`이고 property는 `RO_PASSWORD`다. 팀원에게는
+승인된 비밀 관리 도구로만 전달하고 Kubernetes Secret이나 Secrets Manager
+값을 터미널에 출력하지 않는다.
+
+읽기전용 비밀번호를 바꿀 때는 AWS Console에서 위 JSON Secret의
+`RO_PASSWORD`만 갱신한다. 다른 property를 지우지 않도록 JSON 전체를 확인한 뒤
+ExternalSecret을 즉시 동기화하고, 완료된 Job을 지워 ArgoCD가 새 Secret으로 다시
+실행하게 한다. 비밀 JSON 내용을 CLI의 `--secret-string` 인자에 직접 넣지 않는다.
+
 ```bash
-kubectl get secret postgres-readonly -n db -o jsonpath='{.data.RO_PASSWORD}' | base64 -d; echo
+kubectl annotate externalsecret postgres-readonly -n db \
+  external-secrets.io/force-sync="$(date +%s)" --overwrite
+kubectl wait --for=condition=Ready externalsecret/postgres-readonly \
+  -n db --timeout=180s
+kubectl get externalsecret postgres-readonly -n db \
+  -o custom-columns='NAME:.metadata.name,READY:.status.conditions[0].status,REFRESHED:.status.refreshTime'
+
+kubectl delete job postgres-readonly-role -n db
+kubectl wait --for=create job/postgres-readonly-role -n db --timeout=180s
+kubectl wait --for=condition=Complete job/postgres-readonly-role -n db --timeout=180s
 ```
-비밀번호를 바꾸려면 새 값으로 다시 씰링해 커밋한다 — Job이 다음 sync에서 `ALTER ROLE`로 맞춘다.
+
+Secret 갱신만으로 PostgreSQL role 비밀번호는 바뀌지 않는다. 마지막 Job 재실행이
+`ALTER ROLE`을 수행해야 회전이 끝난다.
+
+### 주 DB 계정 비밀번호 회전
+
+`POSTGRES_PASSWORD`는 컨테이너 최초 초기화에만 쓰인다. Secrets Manager와 Kubernetes Secret만
+바꾸거나 PostgreSQL Pod를 재시작해서는 기존 role 비밀번호가 바뀌지 않는다. 점검 창에서
+다음 순서를 끊지 않고 수행한다.
+
+1. 비밀 관리 도구에서 새 비밀번호를 만들고 AWS Console에서 다음 두 JSON
+   Secret의 `POSTGRES_PASSWORD` property를 **같은 값으로 모두** 갱신한다.
+
+   - `/tapple/prod/postgres-secrets`
+   - `/tapple/prod/app-secrets`
+
+   하나만 바꾸면 DB와 앱이 서로 다른 비밀번호를 읽어 장애가 난다. AWS Console의
+   JSON editor를 쓰거나, 반드시 `umask 077`로 만든 임시 JSON 파일을
+   `--secret-string file://<임시파일>`로 읽히고 즉시 삭제한다. 비밀 JSON을 CLI
+   인자나 Git에 넣지 않는다.
+2. DB와 앱 ExternalSecret을 모두 강제 동기화하고 refresh 시간이 갱신됐는지 확인한다.
+
+   ```bash
+   SYNC_ID="$(date +%s)"
+   kubectl annotate externalsecret postgres-secrets -n db \
+     external-secrets.io/force-sync="$SYNC_ID" --overwrite
+   kubectl annotate externalsecret app-secrets -n app \
+     external-secrets.io/force-sync="$SYNC_ID" --overwrite
+   kubectl wait --for=condition=Ready externalsecret/postgres-secrets \
+     -n db --timeout=180s
+   kubectl wait --for=condition=Ready externalsecret/app-secrets \
+     -n app --timeout=180s
+   kubectl get externalsecret postgres-secrets -n db \
+     -o custom-columns='NAME:.metadata.name,READY:.status.conditions[0].status,REFRESHED:.status.refreshTime'
+   kubectl get externalsecret app-secrets -n app \
+     -o custom-columns='NAME:.metadata.name,READY:.status.conditions[0].status,REFRESHED:.status.refreshTime'
+   ```
+
+3. 기존 PostgreSQL Pod의 로컬 소켓으로 접속해 실제 role 비밀번호를 바꾼다. 아래
+   `\password` 프롬프트에 비밀 관리 도구의 새 값을 두 번 붙여넣는다. 입력은 화면에
+   표시되지 않고 명령 인자에도 들어가지 않는다.
+
+   ```bash
+   kubectl exec -it -n db postgres-0 -- sh -ceu \
+     'exec psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\\password $POSTGRES_USER"'
+   ```
+
+4. 즉시 앱을 재시작해 새 환경변수를 읽게 하고 헬스체크를 확인한다. PostgreSQL Pod는
+   재시작할 필요가 없다.
+
+   ```bash
+   kubectl rollout restart deployment/tapple-server -n app
+   kubectl rollout status deployment/tapple-server -n app --timeout=300s
+   curl -fsS https://api.example.com/actuator/health
+   ```
+
+`\password` 전에 실패하면 앱을 재시작하지 말고 두 Secrets Manager Secret을 모두
+직전 version으로 되돌린 뒤 ExternalSecret을 다시 동기화한다. role 변경 뒤에는
+직전 비밀번호로 되돌리는 경우도 같은 순서로 `\password`와 앱 rollout까지 완료해야
+한다. dev는 `/tapple/dev/postgres-secrets`와 `/tapple/dev/app-secrets`, `dev-db`,
+`dev-app`에 같은 절차를 적용한다.
 
 **권한 확인**
 ```bash

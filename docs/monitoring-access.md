@@ -10,7 +10,7 @@ https://grafana-k3s.tapple.co.kr
 
 kubectl도 kubeconfig도 필요 없다. 브라우저만 있으면 된다.
 
-> 아직 안 열렸다면 아래 **[운영자용](#운영자용)** 의 3단계가 남아 있는 상태다. 그동안은 볼 방법이 없다.
+> 아직 안 열렸다면 아래 **[운영자용](#운영자용)** 의 4단계가 남아 있는 상태다. 그동안은 볼 방법이 없다.
 
 ---
 
@@ -56,7 +56,7 @@ Loki에서 로그 한 줄을 펼치면 `Tempo`로 넘어가는 링크가 있다.
 | ArgoCD UI | 운영자용이다. 내 PR이 떴는지는 URL을 찍어보면 된다 |
 
 ```bash
-curl http://pr-27.api.141.164.40.139.nip.io/actuator/health
+curl "https://pr-27-api.tapple.co.kr/actuator/health"
 ```
 
 ---
@@ -65,24 +65,89 @@ curl http://pr-27.api.141.164.40.139.nip.io/actuator/health
 
 ### 지금 상태
 
-레포에는 다 들어가 있고 **켜는 스위치가 꺼져 있다.** 남은 건 셋이다.
+레포에는 ExternalSecret 계약이 들어가 있고 **OAuth 스위치가 꺼져 있다.**
+남은 것은 네 단계다.
 
 ```
-① Cloudflare DNS  →  grafana-k3s   A   141.164.40.139   [Proxied 🟠]
+① Cloudflare DNS  →  grafana-k3s   A   <IDC_PUBLIC_IP>   [Proxied 🟠]
 
 ② Google Cloud Console → 사용자 인증 정보 → OAuth 클라이언트(웹)
      승인된 리다이렉트 URI:  https://grafana-k3s.tapple.co.kr/login/google
      ※ 앱(tapple-be)이 쓰는 클라이언트와 별개로 만든다
 
-③ Actions → Seal secrets → target: grafana-oauth
-     필요한 Actions 시크릿: GRAFANA_GOOGLE_CLIENT_ID, GRAFANA_GOOGLE_CLIENT_SECRET
+③ AWS Secrets Manager에 JSON Secret 하나를 등록
+     이름: /tapple/platform/monitoring/grafana-google-oauth
+     properties: client-id, client-secret
+     값은 비밀 관리 도구에서 복사해 AWS Console의 JSON editor에서 입력
 
 ④ apps/platform/monitoring/grafana.yaml 의 auth.google.enabled 를 true 로
 ```
 
-④까지 해야 로그인이 켜진다. ③ 전에 ④를 하면 클라이언트 ID가 비어 있어 구글 버튼이 에러를 낸다.
+③의 JSON 구조는 아래처럼 두 property만 갖는다. 예시의 자리표는 실제
+값으로 교체하되 Git이나 공유 문서에 저장하지 않는다.
 
-시크릿이 없어도 Grafana는 뜬다 — `envValueFrom`에 `optional: true`를 줬다. 이걸 빼면 `CreateContainerConfigError`로 죽는다.
+```json
+{
+  "client-id": "<Google OAuth client ID>",
+  "client-secret": "<Google OAuth client secret>"
+}
+```
+
+등록 후 값을 출력하지 말고 ExternalSecret의 상태와 최종 Secret의
+키 이름만 확인한다.
+
+```bash
+kubectl annotate externalsecret grafana-google-oauth -n monitoring \
+  external-secrets.io/force-sync="$(date +%s)" --overwrite
+kubectl wait --for=condition=Ready externalsecret/grafana-google-oauth \
+  -n monitoring --timeout=180s
+kubectl get externalsecret grafana-google-oauth -n monitoring \
+  -o custom-columns='NAME:.metadata.name,READY:.status.conditions[0].status,REFRESHED:.status.refreshTime'
+kubectl get secret grafana-google-oauth -n monitoring \
+  -o go-template='{{range $key, $_ := .data}}{{println $key}}{{end}}'
+```
+
+`client-id`와 `client-secret` 키가 둘 다 있고 refresh 시간이 갱신된 것을 본 뒤
+④를 커밋한다. ArgoCD가 반영하면 롤아웃까지 확인한다.
+
+```bash
+kubectl rollout status deployment/grafana -n monitoring --timeout=300s
+```
+
+시크릿이 없어도 Grafana는 뜬다 — `envValueFrom`에 `optional: true`를 줬다.
+다만 `grafana-google-oauth` ExternalSecret은 Ready=False라 운영 준비가 완료된 상태가
+아니다. Ready 확인 전에 OAuth를 켜지 않는다.
+
+### OAuth 클라이언트 시크릿 회전
+
+이후 Google client secret을 바꿀 때는 AWS Console에서 위 JSON Secret의
+`client-secret` property만 갱신하고 `client-id`는 유지한 뒤
+위 `force-sync` → Ready/refresh 확인 → Grafana 재시작 순서로 한다. Kubernetes
+Secret이 바뀌어도 실행 중인 Grafana 프로세스의 환경변수는 바뀌지 않는다.
+
+```bash
+kubectl rollout restart deployment/grafana -n monitoring
+kubectl rollout status deployment/grafana -n monitoring --timeout=300s
+```
+
+자동화가 필요하면 JSON을 명령행 인자에 넣지 말고 보안 임시 파일로 읽힌다.
+
+```bash
+umask 077
+SECRET_INPUT="$(mktemp)"
+trap 'rm -f "$SECRET_INPUT"' EXIT
+${EDITOR:-vi} "$SECRET_INPUT"    # JSON 전체를 입력하고 저장
+aws secretsmanager put-secret-value \
+  --secret-id /tapple/platform/monitoring/grafana-google-oauth \
+  --secret-string "file://$SECRET_INPUT"
+rm -f "$SECRET_INPUT"
+trap - EXIT
+```
+
+실제 값은 위 명령의 argv에 들어가지 않지만 임시 파일에는 있으므로 로컬
+백업대상이 아닌 안전한 파일시스템에서만 실행하고 즉시 삭제한다. GitHub
+Actions/Git에 복사하지 않는다. Secrets Manager가 version을 보관하므로 회전 실패 시에는
+직전 version으로 롤백한다.
 
 ### 팀원 등록
 
@@ -90,18 +155,11 @@ curl http://pr-27.api.141.164.40.139.nip.io/actuator/health
 Administration → Users and access → Users → New user
   Email:  팀원의 구글 계정 이메일    ← 정확히 일치해야 매칭된다
   Role:   Viewer
-  Password: 아무 값 (구글로 들어오니 쓰이지 않는다)
+  Password: 비밀 관리 도구로 무작위 생성하고 팀원에게 공유하지 않음
 ```
 
-API로도 된다.
-
-```bash
-kubectl port-forward -n monitoring svc/grafana 3000:80 &
-ADMIN_PW=$(kubectl get secret grafana-admin -n monitoring -o jsonpath='{.data.admin-password}' | base64 -d)
-curl -u "admin:${ADMIN_PW}" -X POST http://localhost:3000/api/admin/users \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"팀원","email":"teammate@gmail.com","login":"teammate@gmail.com","password":"'"$(openssl rand -hex 16)"'"}'
-```
+운영자는 비밀 관리 도구의 Grafana admin 자격증명으로 UI에 로그인해 명단을
+관리한다. `grafana-admin` Kubernetes Secret을 터미널에 출력하지 않는다.
 
 **이메일이 구글 계정과 다르면 `signup is not allowed`가 뜬다.** 이게 유일한 실무 함정이다.
 
@@ -124,10 +182,11 @@ curl -u "admin:${ADMIN_PW}" -X POST http://localhost:3000/api/admin/users \
 **오리진 IP로 우회가 가능하다.** Cloudflare를 거치게 해도 IP를 아는 사람은 이렇게 들어온다.
 
 ```bash
-curl -H 'Host: grafana-k3s.tapple.co.kr' http://141.164.40.139/
+curl -H 'Host: grafana-k3s.tapple.co.kr' \
+  "http://${IDC_PUBLIC_IP:?IDC_PUBLIC_IP를 설정하세요}/"
 ```
 
-인증은 그대로 살아 있으므로(구글 로그인 화면이 뜬다) 얻는 건 "TLS 없이 로그인 화면을 본다"뿐이다. 완전히 막으려면 ufw에서 80/443을 Cloudflare 대역으로 제한해야 하는데, 그러면 nip.io 주소가 전부 죽는다. 앱·프리뷰가 실도메인으로 옮겨간 뒤의 작업이다.
+인증은 그대로 살아 있으므로(구글 로그인 화면이 뜬다) 얻는 건 "TLS 없이 로그인 화면을 본다"뿐이다. 모든 공개 endpoint를 Cloudflare 실도메인으로 전환한 뒤 ufw에서 80/443을 Cloudflare 대역으로 제한하면 오리진 우회를 막을 수 있다.
 
 **클라이언트 IP가 Cloudflare IP로 찍힌다.** traefik `trustedIPs`에 Cloudflare 대역을 넣기 전까지는 접속 로그와 레이트리밋이 실사용자 IP를 못 본다.
 
