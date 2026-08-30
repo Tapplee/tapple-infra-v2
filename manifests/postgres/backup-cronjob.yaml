@@ -10,6 +10,8 @@ metadata:
     environment: prod
 spec:
   schedule: "0 18 * * *"
+  # 정식 운영 DB가 홈서버에 있는 동안 대기 k3s 환경의 예약 백업은 실행하지 않는다.
+  suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3

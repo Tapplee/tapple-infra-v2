@@ -37,8 +37,8 @@ spec:
                   prefix: index_
                   period: 24h
           limits_config:
-            # 로컬 loki.yml 그대로 (30d) — 디스크는 PVC 5Gi가 상한
-            retention_period: 7200h
+            # 운영 로그 보유기간은 90일로 제한한다 — 디스크는 PVC 5Gi가 상한
+            retention_period: 2160h
             reject_old_samples: true
             reject_old_samples_max_age: 168h
             # OTLP logs의 resource attribute를 structured metadata로 받기 위해 필수
