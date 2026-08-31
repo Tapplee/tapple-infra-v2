@@ -108,10 +108,10 @@ jobs:
             "${preview_args[@]}" >"$RUNNER_TEMP/tapple-preview-rendered.yaml"
 
           valid_ingress_args=(
-            --set ingress.enabled=true
-            --set-string ingress.host=api.example.com
-            --set-string ingress.tls[0].secretName=cloudflare-origin-cert
-            --set-string ingress.tls[0].hosts[0]=api.example.com
+            --set "ingress.enabled=true"
+            --set-string "ingress.host=api.example.com"
+            --set-string "ingress.tls[0].secretName=cloudflare-origin-cert"
+            --set-string "ingress.tls[0].hosts[0]=api.example.com"
           )
           helm template tapple-ingress charts/tapple-server \
             --namespace app "${valid_ingress_args[@]}" \
