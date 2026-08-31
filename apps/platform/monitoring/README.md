@@ -21,6 +21,7 @@
 - 서비스 주소가 컨테이너명 → k8s DNS (`*.monitoring.svc.cluster.local`)
 - Grafana는 기존 13.0.1 대신 13.2.0 distroless 보안 이미지 사용
 - dashboard sidecar는 `monitoring` namespace의 ConfigMap만 읽고 Secret은 읽지 못함
+- Loki 규칙은 ConfigMap을 직접 마운트해 API 토큰과 cluster-wide watcher RBAC을 제거
 - sidecar에 admin Secret을 넘기지 않고 Grafana provider가 파일 변경을 polling
 - 단일 replica + SQLite PVC라 upgrade는 `Recreate`로 직렬화
 - read-only distroless에서 bundled plugin 자동 쓰기 갱신은 끄고 image/chart upgrade로 갱신
@@ -46,12 +47,12 @@ kube-state-metrics는 `db` namespace의 `jobs`·`cronjobs`만 읽는다. scrape�
 |---|---|---|
 | OTel Collector | 250m / 512Mi | 1Gi |
 | Tempo | 250m / 1Gi | 2Gi |
-| Loki + rules sidecar | 125m / 576Mi | 896Mi |
+| Loki | 100m / 512Mi | 768Mi |
 | Prometheus + reload + Alertmanager + node-exporter + kube-state-metrics | 170m / 960Mi | 1408Mi |
 | Grafana + dashboard sidecar + PVC init | 160m / 464Mi | 1184Mi |
 
 manifest에 선언된 app/sidecar/init container를 보수적으로 단순 합하면
-**955m / 3536Mi(약 3.45Gi) requests**, memory limit **6560Mi(약 6.41Gi)**다.
+**930m / 3472Mi(약 3.39Gi) requests**, memory limit **6432Mi(약 6.28Gi)**다.
 위 Grafana 행에는 일회성 PVC ownership init container의 10m/16Mi request와 32Mi limit도
 보수적으로 더했다.
 prod·dev·preview가 이 스택 하나를 공유하며 `service_name`(`taple` / `taple-dev` /

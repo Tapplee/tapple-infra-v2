@@ -1246,10 +1246,15 @@ jobs:
               "requests": {"cpu": "10m", "memory": "16Mi"},
           }
           loki_statefulset = resource("loki", "StatefulSet", "loki")
-          assert container(loki_statefulset, "loki-sc-rules")["resources"] == {
-              "limits": {"memory": "128Mi"},
-              "requests": {"cpu": "25m", "memory": "64Mi"},
-          }
+          loki_pod_spec = loki_statefulset["spec"]["template"]["spec"]
+          assert loki_pod_spec["automountServiceAccountToken"] is False
+          assert [item["name"] for item in loki_pod_spec["containers"]] == ["loki"]
+          assert not any(
+              document["kind"] in {
+                  "ClusterRole", "ClusterRoleBinding", "Role", "RoleBinding"
+              }
+              for document in rendered_resources["loki"]
+          )
           prometheus_deployment = resource(
               "prometheus", "Deployment", "prometheus-server"
           )

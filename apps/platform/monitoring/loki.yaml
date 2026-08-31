@@ -37,7 +37,8 @@ spec:
                   prefix: index_
                   period: 24h
           limits_config:
-            # 운영 로그 보유기간은 90일로 제한한다 — 디스크는 PVC 5Gi가 상한
+            # 운영 로그 보유기간은 90일로 제한한다. local-path PVC 요청량은
+            # 용량 상한이 아니므로 노드 디스크 사용량도 별도로 감시한다.
             retention_period: 2160h
             reject_old_samples: true
             reject_old_samples_max_age: 168h
@@ -82,11 +83,16 @@ spec:
         gateway: { enabled: false }
         lokiCanary: { enabled: false }
         test: { enabled: false }
-        # single-binary의 rules watcher(k8s-sidecar)도 Burstable 자원 경계를 갖는다.
+        # 규칙 ConfigMap은 위에서 직접 마운트하므로 cluster-wide Secret/ConfigMap
+        # 조회 권한을 요구하는 k8s-sidecar watcher는 사용하지 않는다.
+        serviceAccount:
+          automountServiceAccountToken: false
+        # 차트가 빈 RBAC 객체를 항상 만들기 때문에 scope라도 monitoring으로 제한한다.
+        rbac:
+          namespaced: true
         sidecar:
-          resources:
-            requests: { cpu: 25m, memory: 64Mi }
-            limits: { memory: 128Mi }
+          rules:
+            enabled: false
         monitoring:
           selfMonitoring:
             enabled: false
