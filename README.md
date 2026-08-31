@@ -45,7 +45,7 @@ public 레포라 자격증명 없이 pull한다 — private로 되돌리면 depl
 <picture>
   <source media="(prefers-color-scheme: dark)"  srcset="docs/diagrams/out/traffic-flow-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/diagrams/out/traffic-flow.png">
-  <img alt="인터넷에서 traefik·ingress·service를 거쳐 앱에 닿고, 앱이 postgres와 otel-collector로 나가는 경로" src="docs/diagrams/out/traffic-flow.png">
+  <img alt="사용자가 Cloudflare와 origin TLS를 거쳐 traefik·ingress·service의 앱에 닿고, 앱이 postgres와 otel-collector로 나가는 경로" src="docs/diagrams/out/traffic-flow.png">
 </picture>
 
 **배포 흐름** — 코드 push 부터 클러스터 반영까지. 빨간 화살표의 방향이 이 설계의 핵심이다: **ArgoCD 가 GitHub 을 읽는다(pull).** 앱 레포에서 클러스터로 가는 화살표가 없다.
@@ -83,7 +83,9 @@ public 레포라 자격증명 없이 pull한다 — private로 되돌리면 depl
   <img alt="PR에 preview 라벨을 붙이면 이미지 빌드·ApplicationSet 감지를 거쳐 임시 환경이 생기고, PR을 닫으면 사라지는 흐름" src="docs/diagrams/out/preview-env.png">
 </picture>
 
-`preview` 라벨을 붙이면 3~5분 뒤 `pr-<번호>.api.<호스트>` 가 뜨고, PR 을 닫으면 사라진다. **라벨이 곧 자리 예약**이라 다 본 PR 은 떼야 한다 — 동시 6개가 상한이다.
+IDC DNS/TLS와 실제 host를 설정한 뒤 `preview` 라벨을 붙이면 3~5분 후
+`pr-<번호>-api.<호스트>`가 뜨고, PR을 닫으면 사라진다. 현재 `example.invalid` 값으로는
+의도적으로 열리지 않는다. **라벨이 곧 자리 예약**이라 다 본 PR은 떼야 한다 — `ResourceQuota`가 동시 6개를 강제한다.
 
 **GitOps 제어 흐름** — bootstrap 경계 밖에서 Ansible이 Argo CD·health gate·
 `bootstrap/root-app.yaml`을 적용하고, root가 나머지 14개 Application을 만든다. 점선은
@@ -111,6 +113,15 @@ namespaced `SecretStore` 10개, source 13개, `ExternalSecret` 15개다.
 session tag는 잘못된 Store 연결을 막고 CloudTrail 감사를 돕지만, bootstrap key 소유자는
 유효한 tag를 직접 골라 여섯 역할 모두를 가정할 수 있다. 따라서 보안 경계로 과장하지 않는다.
 이 장기 key는 Phase 1 부채이며, 필요해지면 IAM Roles Anywhere의 단기 자격증명으로 교체한다.
+
+ESO도 단일 cluster-wide controller라 upstream ClusterRole이 모든 namespace의 Kubernetes
+Secret을 관리한다. 지금처럼 한 운영자가 관리하는 단일 팀 클러스터에서는 이 운영 경계를
+수용한다. namespace를 다른 팀에 위임하거나 외부 PR 워크로드를 받기 시작하면 controller와
+AWS bootstrap principal을 prod/non-prod 경계로 분리한다.
+
+Argo CD application controller도 클러스터 전체를 조정하므로 이 레포의 `origin/main`이 사실상
+cluster-admin trust root다. 공개 읽기 자체는 배포 권한이 아니지만 main 쓰기 권한은 그렇다.
+운영 컷오버 전 GitHub MFA, branch protection, 필수 승인과 인프라 검증 status check를 건다.
 
 ## 구조
 
@@ -148,7 +159,7 @@ scripts/gen-team-kubeconfig.sh  팀원용 SA 토큰 kubeconfig 발급 (기본 90
 scripts/bootstrap-external-secrets-aws.sh  legacy secret-zero fallback (표준은 Ansible)
 runbooks/                   재해 복구 절차
 docs/db-access.md           팀원 DB 접속 가이드 (port-forward + 최소권한 RBAC)
-docs/monitoring-access.md   팀원 Grafana 접속 — 구글 로그인, PR별 지표·로그 찾는 법
+docs/monitoring-access.md   팀원 Grafana 접속 — 승인 로컬 계정, origin TLS, PR별 관측법
 docs/preview-environments.md  PR 프리뷰 사용법 — 팀원이 먼저 읽을 문서
 .github/workflows/validate.yml  Helm·Ansible·CloudFormation 정적 검증
 docs/diagrams/              위 그림들의 생성 스크립트 (렌더링은 수동)
@@ -196,11 +207,14 @@ python3 scripts/gen-configmaps.py /다른/경로/config       # 원본 위치가
 | DB | 전용 8Gi Guaranteed | 전용 2Gi | 공유 1대 1Gi, PR 당 database |
 | PriorityClass | `app-important` / `db-critical` | `dev-low` | `preview-lowest` (**가장 먼저 축출**) |
 | DB명 | `tapple` | `tapple_dev` | `tapple_pr<PR번호>` |
-| 백업 | pg_dump CronJob | 없음 | 없음 (7일 미접속 시 database 삭제) |
+| 백업 | pg_dump CronJob (컷오버 전 `suspend`) | 없음 | 없음 (7일 미접속 시 database 삭제) |
 | 관측 | `service_name=taple` | `taple-dev` | `taple-pr<번호>` |
 | 트리거 | `main` push | `dev` push | PR 에 `preview` 라벨 |
 
-**동시 프리뷰는 6개까지다.** 노드 여유(9.8Gi)를 PR 당 1Gi 로 나눈 값이고, 7번째는 `Pending` 에서 멈춘다. `preview` 라벨이 곧 자리 예약이라 다 본 PR 은 라벨을 떼야 한다.
+**동시 프리뷰는 6개까지다.** 상주 워크로드 뒤 여유는 약 8.4Gi이고 PR 당
+1Gi를 예약한다. `preview-budget` ResourceQuota가 Deployment 6개와 namespace 예산을
+강제하므로 7번째 Application은 sync가 거부된다. `preview` 라벨이 곧 자리 예약이라
+다 본 PR은 라벨을 떼야 한다.
 
 ## 네트워크 격리
 
@@ -216,7 +230,11 @@ python3 scripts/gen-configmaps.py /다른/경로/config       # 원본 위치가
 
 Kubernetes API `6443`은 Ansible에서 기본적으로 외부 차단한다. `common_k3s_api_cidrs`가
 비어 있으면 local/SSH 경로로만 운영하고, 팀원 kubeconfig가 꼭 필요할 때만 고정 팀/VPN egress
-CIDR을 넣는다. `0.0.0.0/0` 공개는 금지하며 preflight 이후 UFW 검증에서도 거부한다.
+CIDR을 넣는다. preflight가 `0.0.0.0/0`과 public port의 22/6443을 원격 변경 전에 거부한다.
+Ansible은 현재 SSH peer가 allowlist에 남는지 먼저 확인하고, 원하는 규칙을 추가한 뒤
+목록에 없는 UFW 인바운드 allow를 제거하며 새 SSH 연결까지 검증한다. 별도로 관리하지
+않는 `ufw route allow/limit`, 인바운드 deny/reject, quoted application-profile 규칙이 있으면
+방화벽을 바꾸기 전에 안전하게 실패한다.
 
 ## 리소스 예산 (8 vCPU / 32GB 노드)
 
@@ -229,9 +247,10 @@ CIDR을 넣는다. `0.0.0.0/0` 공개는 금지하며 preflight 이후 UFW 검�
 | prod 앱 | 4Gi / 1000m | 6Gi / 3000m | Burstable |
 | dev PostgreSQL | 2Gi / 250m | 2Gi / 1000m | Burstable |
 | dev 앱 | 2Gi / 250m | 3Gi / 1500m | Burstable |
-| 모니터링 스택 전체 | ~2.2Gi / 440m | ~3.3Gi | Burstable |
+| 프리뷰 공유 PostgreSQL | 1Gi / 200m | 1Gi / 1000m | Burstable |
+| 모니터링 스택 전체 | ~2.53Gi / 590m | memory ~4.31Gi | Burstable |
 | ArgoCD + Traefik + External Secrets | ~0.4Gi / 540m | 일부 미설정 | 혼합 |
-| **합계 (requests)** | **~18.6Gi / 4.47 vCPU** | | 여유 **~9.7Gi / ~2.5 vCPU** |
+| **상주 합계 (requests)** | **~19.9Gi / 4.83 vCPU** | | 여유 **~8.4Gi / ~2.2 vCPU** |
 
 - requests는 **스케줄러가 자리를 잡아두는 예약**일 뿐이라, 유휴 CPU는 limits 한도까지 다른 파드가 그대로 쓴다 → prod 앱은 순간 3코어까지 뻗을 수 있음.
 - 축출 순서: `dev-low`(-100) → 모니터링·기본(0) → `app-important`(1000) → `db-critical`(1000000).
@@ -287,7 +306,8 @@ cfn-lint infra/aws/external-secrets-iam.yaml
 Ansible은 UFW·SSH·swap·커널 설정, 고정 버전 k3s와 Argo CD, datastore의 Secret at-rest
 암호화, custom health, `external-secrets/aws-bootstrap`, root Application을 순서대로 구성한다.
 AWS Secret이나 JSON property가 하나라도 빠지면 해당 ExternalSecret이 Ready가 되지 않고
-후속 wave도 진행되지 않는다. `infra/k3s-setup.sh`는 표준 경로가 아니라 복구용 fallback이다.
+후속 wave도 진행되지 않으며, root가 `Synced + Healthy`가 되지 않아 playbook도 성공 종료하지
+않는다. `infra/k3s-setup.sh`는 표준 경로가 아니라 복구용 fallback이다.
 
 **RTO 10분은 대체 노드가 이미 준비된 뒤 소프트웨어를 재구축하는 목표에만 해당한다.** 물리
 서버 자체가 소실되면 하드웨어 교체와 IDC 원격 손 대응은 공급자 SLA에 달려 있어 수시간 이상
@@ -318,17 +338,20 @@ PR 프리뷰 쪽 함정 4개(라벨 필터 위치, sprig `substr` 인자 순서,
 ## 남은 TODO
 
 - [ ] **도메인 + TLS** — values는 의도적으로 해석되지 않는 `*.example.invalid` placeholder다. IDC 실도메인으로 바꾸기 전에는 세 환경(prod·dev·preview)에 접근할 수 없고 Google 로그인도 안 된다(Google OAuth는 사전 등록한 HTTPS redirect URI 요구). 고칠 곳은 `values.yaml`·`values-dev.yaml`의 `ingress.host`와 ApplicationSet의 preview host. **프리뷰 host는 1단으로 평평하게** — Cloudflare Universal SSL이 `*.tapple.co.kr`까지만 커버하므로 `pr-27.api.tapple.co.kr` 대신 `pr-27-api.tapple.co.kr` 형태를 쓴다.
-- [ ] **Grafana 팀원 공개 — 사람 손 4개 남음** ([docs/monitoring-access.md](docs/monitoring-access.md)): ①Cloudflare A 레코드 ②Google Console redirect URI ③`/tapple/platform/monitoring/grafana-google-oauth` JSON의 `client-id`·`client-secret` ④`grafana.yaml`의 `auth.google.enabled: true`. `allow_sign_up=false`라 운영자가 미리 승인한 사용자만 로그인한다.
+- [ ] **Grafana 팀원 공개** ([docs/monitoring-access.md](docs/monitoring-access.md)): ①Cloudflare Origin Certificate를 `/tapple/platform/monitoring/grafana-origin-tls` JSON(`certificate`·`private-key`)에 입력 ②Proxied A 레코드 ③SSL 모드 Full (strict) ④운영자가 Viewer 로컬 계정을 만들고 승인된 비밀번호 관리 도구로 전달. 공개 가입·익명 접근은 꺼져 있다. MFA가 필요하면 Cloudflare Access와 origin 우회 차단을 함께 적용한다.
 - [ ] Discord webhook 실값 — `/tapple/platform/monitoring/alertmanager-discord` JSON의 `discord-webhook`과 환경별 `app-secrets` JSON의 `DISCORD_*` property를 새로 넣는다.
 - [ ] 새 Secrets Manager 값 입력 시 전면 로테이션 — 과거 Git 이력·테스트 클러스터에 있던 AWS 키·Google 시크릿·JWT 키는 재사용하지 않는다. `JWT_SECRET_KEY`를 바꾸면 전원이 즉시 로그아웃되고, `SLUG_RESERVATION_HMAC_KEY`는 이전 키를 `previousKeys`에 **남긴 채** 버전만 올려야 한다.
 - [ ] `/tapple/platform/argocd/preview-github-token` 만료 관리 — fine-grained PAT이라 만료되면 **프리뷰가 조용히 안 뜬다**. 증상은 ApplicationSet 상태의 `error fetching Secret token`
-- [ ] monitoring upstream 차트 4종 설치 시점 최신 고정 (ESO 2.10.0은 고정 완료)
+- [ ] Grafana 외 monitoring upstream 차트 4종 설치 시점 최신 고정 (Grafana·ESO는 고정 완료)
 - [ ] Argo CD upstream raw manifest의 resource requests/limits 명시 — 현재 ESO는 제한했지만 Argo CD 일부 컴포넌트는 upstream 기본값이라 상한이 없다.
 - [ ] IDC 물리 서버의 실제 CPU·메모리·NVMe·공인 IP·회선·원격 손 SLA와 월 요금 확인 — 매니페스트의 현재 용량 가정은 **8 vCPU / 32GB**다.
+- [ ] **백업 컷오버** — 외부 오브젝트 스토리지의 versioning·보존 정책과 `/tapple/prod/backup-s3`를 검증한 뒤 `pg-backup`의 `suspend`를 `false`로 바꾼다. 수동 1회 dump+SHA-256 업로드와 별도 환경 restore 리허설까지 통과시킨다.
 - [ ] Traefik `trustedIPs`(Cloudflare 대역) — 없으면 로그·레이트리밋에 실 사용자 IP 대신 Cloudflare IP가 찍힘
 - [ ] ghcr retention — 오래된 이미지 자동 삭제 (최근 N개 + 배포 중 태그는 보존)
 - [ ] Secrets Manager 자동 회전 — IDC PostgreSQL·대상 서비스로의 안전한 네트워크 경로와 무중단 회전 계약을 먼저 만든 뒤 도입. 현재는 수동 회전한다.
 - [ ] secret-zero 장기 access key 제거 — Phase 1에서는 주기적으로 회전하고, 필요 시 IAM Roles Anywhere의 단기 자격증명으로 교체한다.
+- [ ] 멀티테넌트 전환 시 ESO 분리 — 현재 단일 controller의 cluster-wide Secret RBAC를 수용한다. namespace 운영권을 다른 팀에 위임하거나 외부 PR을 받기 전에 prod/non-prod controller와 AWS principal을 분리한다.
+- [ ] Git trust root 보호 — GitHub MFA와 `main` branch protection을 켜고, 직접 push 금지·필수 승인·`Validate infrastructure` 통과를 merge 조건으로 둔다.
 - [ ] 팀원 kubeconfig 발급 — [docs/db-access.md](docs/db-access.md) §6 (토큰 기본 90일). 먼저 팀/VPN 고정 egress CIDR만 `common_k3s_api_cidrs`에 허용하고, 만료 시 재발급
 - [~] 대시보드의 AWS 잔재 — `AWS Region`·`RDS Instance` 변수와 그 패널들이 CloudWatch 데이터소스를 요구해 k3s 에서는 에러로 뜬다. **그대로 두기로 결정**했다 (원본은 v1 소유이고 부하 리그가 같은 파일을 쓴다)
 - [x] PR 프리뷰 환경 — ApplicationSet(PR 생성기) + 공유 DB + PR 당 database. PR #27 로 전 과정 실측

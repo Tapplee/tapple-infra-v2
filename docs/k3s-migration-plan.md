@@ -46,7 +46,7 @@
 | # | 결정 항목 | 확정값 | 근거 |
 |---|---|---|---|
 | D1 | 호스팅 | **임대한 generic IDC 물리 서버 한 대** | 한 공급자 제품명에 설계를 묶지 않는다. 실제 사양·회선·원격 손 SLA는 발주 시 확정 |
-| D2 | 서버 용량 | **8 vCPU / 32GB / NVMe 가정** (v3에서 4 vCPU/16GB → 8 vCPU/32GB) | dev 환경(D18)을 같은 노드에 상주시키려면 16GB로는 여유가 ~1.5Gi뿐. 현재 예산은 requests 후 여유 ~10Gi / ~2.5 vCPU이며 실제 물리 CPU·메모리로 다시 검증 |
+| D2 | 서버 용량 | **8 vCPU / 32GB / NVMe 가정** (v3에서 4 vCPU/16GB → 8 vCPU/32GB) | dev·프리뷰 공유 DB까지 상주시킨 현재 예산은 requests 후 여유 ~8.4Gi / ~2.2 vCPU다. 실제 물리 CPU·메모리로 다시 검증 |
 | D3 | 오케스트레이터 | **k3s 단일 노드** | 경량 컨트롤 플레인, 내장 Traefik/local-path |
 | D4 | 데이터베이스 | **PostgreSQL StatefulSet, k3s 내부** (v2에서 변경) | 단일 노드라 호스트 분리의 가용성 이점이 절대적이지 않음. k3s 안에 넣으면 DB까지 GitOps 관리 → 재구축 시 ArgoCD apply로 전체 복원. eviction 리스크는 Guaranteed QoS + PriorityClass로 방어 |
 | D5 | 앱 실행 | k8s Deployment (`app` 네임스페이스, Burstable) | 배포·롤백·자가치유 |
@@ -58,7 +58,7 @@
 | D11 | 미디어/파일 | S3 호환 오브젝트 스토리지(공급자 발주 시 확정) | 노드 소실과 분리하고 외부 백업·미디어 원본으로 사용 |
 | D12 | 트래픽 | 발주 회선 한도와 실측 트래픽에 알림 설정 | 과거 iwinv 600GB 가정은 폐기. 공급자 조건을 설계 사실로 고정하지 않는다 |
 | D13 | 가용성(SLO) | 짧은 다운 허용. **~10분은 대체 노드가 준비된 뒤 소프트웨어 재구축 목표** | 물리 장비 교체·IDC 원격 손은 공급자 의존이며 수시간 이상 걸릴 수 있다 |
-| D14 | 백업/DR | `pg_dump` **CronJob**(k8s) → 외부 오브젝트 스토리지(매일 + 배포 직전), k3s sqlite 스냅샷, Ansible + 재구축 런북 | DB가 k3s 안이므로 백업도 k8s 매니페스트로 Git 관리. 노드와 다른 장애 영역에 저장 |
+| D14 | 백업/DR | `pg_dump` **CronJob**(k8s) → versioning·보존 정책을 켠 외부 오브젝트 스토리지(매일 + 배포 직전, dump+SHA-256), k3s sqlite 스냅샷, Ansible + 재구축 런북. 운영 컷오버 전에는 `suspend: true` | DB가 k3s 안이므로 백업도 k8s 매니페스트로 Git 관리. 노드와 다른 장애 영역에 저장하고 checksum 확인·restore 리허설 후 예약 실행을 켠다 |
 | D15 | 시크릿 | **AWS Secrets Manager + ESO 2.10.0**. Kubernetes Secret 계약별 JSON source 13개, 환경별 IAM role 6개, namespaced `SecretStore` 10개, `ExternalSecret` 15개 | Git에는 이름·property 계약만 둔다. 역할은 `GetSecretValue`를 자기 경로에 제한하고 custom health가 Ready까지 다음 wave를 막는다 |
 | D16 | 서드파티 Helm | **vendoring 안 함.** ArgoCD Application이 upstream chart repo URL + values.yaml만 참조 | Git에는 values만. 차트 복사·포크 불필요 |
 | D17 | PostgreSQL 차트 | **Bitnami 차트 사용 안 함** — 공식 `postgres` 이미지 + 자작 StatefulSet | 2025-08 Broadcom이 Bitnami 무료 이미지 중단(bitnamilegacy 이관). 단일 노드엔 StatefulSet ~60줄이면 충분, 오퍼레이터(CloudNativePG)는 과함 |
@@ -115,6 +115,10 @@ Secret만 `GetSecretValue`한다.
 session tag는 잘못된 namespace/Store 연결을 막고 CloudTrail 감사를 돕지만 bootstrap key
 소유자가 유효한 tag를 선택할 수 있으므로 보안 경계는 아니다. 이 장기 key는 Phase 1 부채이며,
 위협 모델이 커지면 IAM Roles Anywhere의 단기 자격증명으로 교체한다.
+단일 ESO controller의 upstream RBAC도 cluster-wide Secret 관리 권한을 가진다. 외부 PR을
+받거나 namespace 운영권을 분리하는 시점에는 prod/non-prod controller와 principal을 나눈다.
+Argo CD controller는 클러스터 trust root이므로 `main` 쓰기 권한도 cluster-admin 수준으로 보고
+운영 전 branch protection·필수 승인·검증 status check·GitHub MFA를 적용한다.
 
 ---
 
@@ -135,9 +139,10 @@ session tag는 잘못된 namespace/Store 연결을 막고 CloudTrail 감사를 �
 | 앱 (`app`) | 4Gi / 1000m | 6Gi / 3000m | Burstable | `app-important`. JVM MaxRAMPercentage=75 → 힙 ~4.5Gi |
 | dev PostgreSQL (`dev-db`) | 2Gi / 250m | 2Gi / 1000m | Burstable | `dev-low`. `shared_buffers=512MB` |
 | dev 앱 (`dev-app`) | 2Gi / 250m | 3Gi / 1500m | Burstable | `dev-low` |
-| OTel 스택 (전체) | ~2.2Gi / 440m | ~3.3Gi | Burstable | prod·dev 공유. 샘플링 10% 유지 |
+| 프리뷰 공유 PostgreSQL (`preview`) | 1Gi / 200m | 1Gi / 1000m | Burstable | `preview-lowest`. PR별 database 공유 |
+| OTel 스택 (전체) | ~2.53Gi / 590m | ~4.31Gi | Burstable | prod·dev 공유. 샘플링 10% 유지 |
 | ArgoCD + Traefik + External Secrets Operator | ~0.4Gi / 540m | 일부 미설정 | 혼합 | ESO는 명시, Argo CD 일부는 upstream 기본 |
-| **requests 합** | **~18.6Gi / 4.47 vCPU** | | | allocatable(28.3Gi / 7 vCPU) 대비 **~9.7Gi · ~2.5 vCPU 여유** |
+| **상주 requests 합** | **~19.9Gi / 4.83 vCPU** | | | allocatable(28.3Gi / 7 vCPU) 대비 **~8.4Gi · ~2.2 vCPU 여유** |
 
 > requests는 **스케줄러가 잡아두는 예약**일 뿐이라 유휴 CPU는 limits 한도까지 다른 파드가 쓴다 — prod 앱은 순간 3코어까지 뻗을 수 있다.
 
@@ -175,7 +180,7 @@ ansible-playbook --check --tags preflight playbooks/bootstrap.yml
 - [x] Ubuntu 22.04/24.04 x86_64 단일 host만 허용하는 preflight와 `CHANGE_ME`·명시적 confirm guard
 - [ ] `ansible_host`, key+sudo `ansible_user`, `common_admin_ssh_cidrs`를 실제 값으로 설정
 - [ ] 팀원 kubeconfig가 꼭 필요할 때만 `common_k3s_api_cidrs`에 고정 팀/VPN egress CIDR을 추가
-- [x] UFW는 SSH allowlist·80/443·k3s pod/service CIDR만 열고 `6443`은 기본 차단. `0.0.0.0/0` API 공개는 assertion으로 거부
+- [x] UFW 인바운드 allow는 Ansible이 전부 소유: SSH allowlist·80/443·k3s pod/service CIDR만 열고 `6443`은 기본 차단. broad CIDR·public 22/6443은 변경 전 거부하고 선언 밖 과거 allow 규칙은 제거. 기존 inbound deny/reject·route allow/limit·quoted profile은 변경 전에 fail-fast
 - [x] swap 비활성화, kernel module/sysctl, key-only SSH, Asia/Seoul timezone 자동화
 - **검증**: `common_k3s_api_cidrs`가 비어 있으면 API는 local/SSH로만 운영. 값이 있으면 명시한 CIDR만 `6443/tcp` 허용
 
@@ -191,7 +196,7 @@ ansible-playbook playbooks/bootstrap.yml
 - [x] AWS 자격증명은 기본 hidden prompt 또는 승인된 controller 환경변수로 받고, `no_log` + stdin으로 `external-secrets/aws-bootstrap` 주입
 - [x] root보다 먼저 Argo CD의 `Application`·`SecretStore`·`ExternalSecret` custom health 적용
 - [x] root app 이후 네임스페이스 7개와 PriorityClass 4종은 GitOps로 배포
-- **검증**: `kubectl describe node`, `k3s secrets-encrypt status`, 10개 `SecretStore`와 15개 `ExternalSecret`의 `Ready=True`, 하위 Application `Healthy`
+- **검증**: playbook 정상 종료 자체가 root `Synced+Healthy`를 뜻한다. 추가로 `kubectl describe node`, `k3s secrets-encrypt status`, 10개 `SecretStore`와 15개 `ExternalSecret`의 `Ready=True`, 하위 Application `Healthy` 확인
 
 `infra/k3s-setup.sh`와 `scripts/bootstrap-external-secrets-aws.sh`는 복구용 fallback이다.
 신규 설치와 반복 실행의 표준은 Ansible이다.
@@ -211,7 +216,7 @@ ansible-playbook playbooks/bootstrap.yml
 
 ### Phase 5 — 인그레스 + Cloudflare + TLS
 - [ ] Traefik IngressRoute, Cloudflare A 레코드 + orange cloud ON
-- [ ] Origin Certificate 설치, SSL 모드 Full (strict), 정적 에셋 캐시 규칙
+- [~] Grafana Origin Certificate는 Secrets Manager→ESO 계약과 Ingress TLS 연결 완료. 실제 인증서 입력, 나머지 앱 host의 origin TLS, SSL 모드 Full (strict), 정적 에셋 캐시 규칙은 컷오버 때 적용
 - **검증**: HTTPS 접속, dig로 실 IP 미노출 확인
 
 ### Phase 6 — OTel 관측성 (조여서)
@@ -232,7 +237,7 @@ ansible-playbook playbooks/bootstrap.yml
 - **검증**: push 한 번으로 배포까지 완주
 
 ### Phase 9 — 백업 / DR
-- [ ] `pg_dump` **CronJob** (k8s, Git 관리): 매일 + 배포 직전(CI 트리거) → 오브젝트 스토리지, 보존 일 7/주 4
+- [ ] `pg_dump` **CronJob** (k8s, Git 관리): versioning·보존 정책·restore 검증 후 `suspend: false`, 매일 + 배포 직전(CI 트리거) → dump와 SHA-256을 오브젝트 스토리지에 업로드, 보존 일 7/주 4
 - [ ] k3s sqlite 스냅샷 → 오브젝트 스토리지
 - [ ] 재구축 런북: 대체 노드 준비 → Ansible → ESO/Argo CD health 통과 → GitOps 복원 → pg_restore
 - [ ] **복원 리허설 1회 필수**
@@ -324,7 +329,7 @@ tapple-be/.github/workflows/cd-gitops.yml  # build → ghcr.io → 이 레포 im
 - ~~6. Grafana 알림 채널~~ → Discord webhook, 기존 alertmanager 라우팅 이식
 
 **남음**
-1. 도메인/서브도메인 구조 — values의 `*.example.invalid`는 운영 전 fail-safe placeholder다. IDC 앱·dev·Grafana·ArgoCD UI 실도메인 확정 필요
+1. 도메인/서브도메인 구조 — values의 `*.example.invalid`는 운영 전 fail-safe placeholder다. IDC 앱·dev·preview·ArgoCD UI 실도메인 확정 필요. Grafana는 기존 `grafana-k3s.tapple.co.kr`를 유지한다
 2. IDC 물리 서버 실제 사양·회선·원격 손 SLA·월 요금 — 홈서버 대비 **순증 비용**이고 하드웨어 복구 시간의 상한을 결정한다
 3. Traefik `trustedIPs` — Cloudflare 뒤에서 실 클라이언트 IP 복원
 4. BE `prod` 프로파일의 CloudWatch appender — AWS 떠나면 무의미. k3s 전용 프로파일이 필요한지 결정
@@ -388,7 +393,7 @@ database 를 나누지 않으면 여러 PR 의 Flyway 가 같은 스키마를 �
 
 메모리 압박 시 프리뷰가 가장 먼저 죽어야 한다. `dev-low`(-100) 아래 `preview-lowest` 를 새로 만든다.
 
-### 메모리 예산 (2026-08-11 실측 기준)
+### 메모리 예산 (2026-08-11 초기 실측, 현재는 위 §4-2와 ResourceQuota가 기준)
 
 | | |
 |---|---|
@@ -397,7 +402,11 @@ database 를 나누지 않으면 여러 PR 의 Flyway 가 같은 스키마를 �
 | 여유 | **9.8 Gi** |
 | 프리뷰 공유분 (postgres-preview) | 1 Gi (1회) |
 | PR 당 | 1 Gi (앱만, prod 의 1/4) |
-| **동시 PR 최대** | **약 8개** — 여유 2Gi 를 남기면 **6개 권장** |
+| **당시 계산** | 약 8개 — 여유 2Gi 를 남겨 6개 권장 |
+
+현재 상주 requests는 약 19.9Gi이고 프리뷰 DB까지 포함한 남은 메모리는 약 8.4Gi다.
+`preview-budget` ResourceQuota가 `count/deployments.apps=6`과 namespace 자원 예산을
+강제하므로 현재 운영 상한은 권장이 아니라 **6개**다.
 
 ### 구현 상태
 
@@ -405,6 +414,7 @@ database 를 나누지 않으면 여러 PR 의 Flyway 가 같은 스키마를 �
       애노테이션 크기 오류로 실패했을 때 이것만 안 들어왔고 컨트롤러가 감시 대상 없이 헛돌았다
 - [x] `apps/preview/applicationset.yaml` — PR 생성기 + `preview` 라벨 필터
 - [x] `apps/preview/postgres.yaml` + `manifests/postgres-preview/` — 공유 postgres 1대
+- [x] `manifests/cluster/preview-resourcequota.yaml` — Deployment 6개와 namespace 자원 상한 강제
 - [x] `createdb` Job — 차트에 `createDatabase.enabled` 로 게이트, `\gexec` 로 멱등
 - [x] `preview-lowest` PriorityClass (-1000) + `preview` 네임스페이스
 - [x] `charts/tapple-server/values-preview.yaml` + `fullnameOverride` 지원
