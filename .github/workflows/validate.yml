@@ -97,10 +97,10 @@ jobs:
 
           preview_args=(
             --values charts/tapple-server/values-preview.yaml
-            --set-string image.tag=ci
-            --set-string fullnameOverride=tapple-server-pr-ci
-            --set-string createDatabase.name=tapple_pr_ci
-            --set-string ingress.host=pr-ci-api.example.invalid
+            --set-string "image.tag=ci"
+            --set-string "fullnameOverride=tapple-server-pr-ci"
+            --set-string "createDatabase.name=tapple_pr_ci"
+            --set-string "ingress.host=pr-ci-api.example.invalid"
           )
           helm lint charts/tapple-server --strict "${preview_args[@]}"
           helm template tapple-preview charts/tapple-server \
