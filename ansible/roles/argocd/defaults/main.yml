@@ -101,6 +101,7 @@ argocd_resource_patches:
                   requests: { cpu: 100m, memory: 256Mi }
                   limits: { cpu: '1', memory: 1Gi }
 argocd_health_manifest_path: "{{ playbook_dir }}/../../manifests/cluster/argocd-health.yaml"
+argocd_projects_manifest_path: "{{ playbook_dir }}/../../apps/projects.yaml"
 argocd_root_app_manifest_path: "{{ playbook_dir }}/../../bootstrap/root-app.yaml"
 argocd_root_app_ready_timeout: 30m
 argocd_root_app_refresh_retries: 900

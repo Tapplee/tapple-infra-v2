@@ -9,7 +9,8 @@
 # 필요한 것
 #   - Secret preview-github-token (argocd 네임스페이스) : PR 목록 조회용 PAT.
 #     Secrets Manager /tapple/platform/argocd/preview-github-token에서 ESO가 동기화한다.
-#     tapple-be 가 private 이라 토큰 없이는 PR 을 못 읽는다. 권한은 contents:read + pull_requests:read.
+#     public repo여도 API rate limit과 안정적인 polling을 위해 사용한다.
+#     권한은 contents:read + pull_requests:read만 준다.
 #   - tapple-be 의 cd-gitops.yml 이 라벨 붙은 PR 브랜치의 이미지를 ghcr 에 올려둬야 한다.
 #     그 이미지가 없으면 파드가 ImagePullBackOff 로 남는다.
 #   - `*.example.invalid` host는 운영 전 fail-safe placeholder다. IDC DNS/TLS 확정 뒤
@@ -61,7 +62,7 @@ spec:
       finalizers:
         - resources-finalizer.argocd.argoproj.io
     spec:
-      project: default
+      project: preview
       source:
         repoURL: https://github.com/Tapplee/tapple-infra-v2.git
         targetRevision: main

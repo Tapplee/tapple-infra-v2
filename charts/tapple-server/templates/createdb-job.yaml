@@ -1,4 +1,8 @@
 {{- if .Values.createDatabase.enabled }}
+{{- $databaseOwner := required "createDatabase.owner 이 필요하다" .Values.createDatabase.owner -}}
+{{- if ne $databaseOwner "tapple_preview_app" -}}
+{{- fail "createDatabase.owner는 tapple_preview_app 이어야 한다" -}}
+{{- end -}}
 {{- /*
   PR 프리뷰용 database 생성. 프리뷰만 켠다 (prod·dev 는 database 가 시크릿에 이미 있다).
 
@@ -16,15 +20,19 @@ metadata:
   name: {{ include "tapple-server.fullname" . }}-createdb
   labels:
     {{- include "tapple-server.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database-bootstrap
   annotations:
     argocd.argoproj.io/sync-wave: "-1" # 앱(기본 0)보다 먼저
-    argocd.argoproj.io/sync-options: Replace=true # Job spec 은 immutable — 교체로 처리
+    # Job spec은 불변이고 selector는 controller가 생성하므로 delete/create로 교체한다.
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
 spec:
-  backoffLimit: 5
+  activeDeadlineSeconds: {{ .Values.createDatabase.activeDeadlineSeconds }}
+  backoffLimit: {{ .Values.createDatabase.backoffLimit }}
   template:
     metadata:
       labels:
         {{- include "tapple-server.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: database-bootstrap
     spec:
       restartPolicy: Never
       priorityClassName: {{ .Values.priorityClassName }}
@@ -38,14 +46,26 @@ spec:
       containers:
         - name: createdb
           image: postgres:16.15-bookworm@sha256:bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825
-          command: ["sh", "-c"]
+          command: ["sh", "-ec"]
           args:
             - |
-              set -eu
+              if [ "$TARGET_OWNER" != "tapple_preview_app" ]; then
+                echo "database 생성 거부: 허용되지 않은 owner: $TARGET_OWNER" >&2
+                exit 64
+              fi
+              database_ready=false
+              for i in $(seq 1 40); do
+                if pg_isready -q; then
+                  database_ready=true
+                  break
+                fi
+                sleep 3
+              done
+              test "$database_ready" = true
               # \gexec — SELECT 가 만들어낸 SQL 문자열을 실행한다. 이미 있으면 아무것도 안 만든다.
               # CREATE DATABASE 는 트랜잭션 안에서 못 돌아 psql 변수 + \gexec 조합을 쓴다.
-              psql -v ON_ERROR_STOP=1 --set=db="$TARGET_DB" <<'SQL'
-              SELECT format('CREATE DATABASE %I', :'db')
+              psql -v ON_ERROR_STOP=1 --set=db="$TARGET_DB" --set=owner="$TARGET_OWNER" <<'SQL'
+              SELECT format('CREATE DATABASE %I OWNER %I', :'db', :'owner')
                 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db') \gexec
               SQL
               echo "database 준비 완료: $TARGET_DB"
@@ -64,8 +84,14 @@ spec:
                   key: POSTGRES_PASSWORD
             - name: PGDATABASE
               value: {{ .Values.createDatabase.bootstrapDatabase | quote }}
+            - name: PGCONNECT_TIMEOUT
+              value: {{ .Values.createDatabase.connectTimeoutSeconds | quote }}
+            - name: PGOPTIONS
+              value: {{ printf "-c statement_timeout=%s" .Values.createDatabase.statementTimeout | quote }}
             - name: TARGET_DB
               value: {{ required "createDatabase.name 이 필요하다" .Values.createDatabase.name | quote }}
+            - name: TARGET_OWNER
+              value: {{ $databaseOwner | quote }}
           resources:
             requests: { cpu: 50m, memory: 64Mi }
             limits: { memory: 128Mi }

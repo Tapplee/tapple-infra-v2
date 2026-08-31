@@ -9,11 +9,11 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: default
+  project: monitoring
   source:
     repoURL: https://grafana.github.io/helm-charts
     chart: loki
-    # TODO(Phase 6): 설치 시점 최신 안정 버전 고정
+    # upgrade는 이 version과 CI render contract을 같은 PR에서 바꾼다.
     targetRevision: 6.24.0
     helm:
       valuesObject:
@@ -22,6 +22,7 @@ spec:
         loki:
           image:
             tag: 3.7.2 # compose와 동일
+            digest: sha256:191d4fdfb7264f16989f0a57f320872620a5a7c2ceeec6229212c4190ec49b86
           auth_enabled: false
           commonConfig:
             replication_factor: 1
@@ -105,5 +106,3 @@ spec:
     automated:
       selfHeal: true
       prune: true
-    syncOptions:
-      - CreateNamespace=true

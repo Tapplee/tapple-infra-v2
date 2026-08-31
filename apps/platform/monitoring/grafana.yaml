@@ -10,7 +10,7 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: default
+  project: monitoring
   source:
     repoURL: https://grafana-community.github.io/helm-charts
     chart: grafana
@@ -20,6 +20,9 @@ spec:
     helm:
       valuesObject:
         fullnameOverride: grafana
+        image:
+          tag: 13.2.0-distroless
+          sha: 08e6ab6d67a5e21e6540724d3673a572840a43b1ba02d03922d0a21a7dbb38f9
         # Secrets Manager /tapple/platform/monitoring/grafana-admin → ExternalSecret/grafana-admin
         admin:
           existingSecret: grafana-admin
@@ -37,6 +40,9 @@ spec:
           limits: { memory: 1Gi }
         # PVC ownership을 한 번 조정하는 chart 생성 init container의 자원 경계.
         initChownData:
+          image:
+            tag: "1.38.0"
+            sha: dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
           resources:
             requests: { cpu: 10m, memory: 16Mi }
             limits: { memory: 32Mi }
@@ -44,6 +50,9 @@ spec:
           enabled: false
         # manifests/monitoring/dashboards/의 ConfigMap(label: grafana_dashboard=1)을 자동 로드
         sidecar:
+          image:
+            tag: 2.10.3
+            sha: e8fb0c4fa3c5a22d9d0eabd9c13cf5df9ce65cba6a062272f2a762f7a78284d6
           resources:
             requests: { cpu: 50m, memory: 64Mi }
             limits: { cpu: 100m, memory: 128Mi }
@@ -176,5 +185,3 @@ spec:
     automated:
       selfHeal: true
       prune: true
-    syncOptions:
-      - CreateNamespace=true

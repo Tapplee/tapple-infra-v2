@@ -10,13 +10,13 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: default
+  project: prod
   source:
     repoURL: https://github.com/Tapplee/tapple-infra-v2.git
     targetRevision: main
     path: charts/tapple-server
     helm:
-      # 기본 values.yaml 사용 — CI(Phase 8)가 values.yaml의 image.tag를 bump하면 자동 배포
+      # 기본 values.yaml 사용 — CI가 image.tag와 image.digest를 함께 바꾸면 자동 배포한다.
       valueFiles:
         - values.yaml
   destination:
@@ -26,5 +26,3 @@ spec:
     automated:
       selfHeal: true
       prune: true
-    syncOptions:
-      - CreateNamespace=true

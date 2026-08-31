@@ -1,10 +1,16 @@
 # dev 환경 오버라이드 — values.yaml 위에 덮어씀 (여기 없는 값은 prod와 동일)
-# CI: develop 브랜치 머지 시 Actions가 이 파일의 image.tag만 bump
+# CI: dev 브랜치 머지 시 Actions가 이 파일의 image.tag와 digest를 함께 bump
 
 environment: dev
 
 image:
   tag: "798bd9484b43"
+  # base의 prod digest를 상속하면 안 된다. dev CD가 자기 이미지 digest로 함께 갱신한다.
+  digest: ""
+
+networkPolicy:
+  database:
+    namespace: dev-db
 
 ingress:
   # 실제 dev host와 origin TLS Secret을 함께 준비하기 전에는 외부 노출하지 않는다.
@@ -33,6 +39,7 @@ env:
   SPRING_APPLICATION_NAME: taple-dev
   DEPLOY_ENV: dev
   POSTGRES_URL: jdbc:postgresql://postgres.dev-db.svc.cluster.local:5432/tapple_dev
+  POSTGRES_USERNAME: tapple_dev_app
   # 관측 스택은 prod와 공유 — deployment_environment=dev 라벨로 구분해서 본다
   OTEL_URL: http://otel-collector.monitoring.svc.cluster.local:4318
   # prod 기본값을 상속해 개발 데이터가 자동 파기되지 않도록 명시적으로 끈다.

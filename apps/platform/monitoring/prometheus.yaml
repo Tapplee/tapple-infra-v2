@@ -11,22 +11,33 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: default
+  project: monitoring
   source:
     repoURL: https://prometheus-community.github.io/helm-charts
     chart: prometheus
-    # TODO(Phase 6): 설치 시점 최신 안정 차트 버전 고정 (내부 이미지 태그는 아래서 compose와 동일하게 고정)
+    # upgrade는 chart version과 아래 image 설정, CI render contract을 같은 PR에서 바꾼다.
     targetRevision: 27.3.0
     helm:
       valuesObject:
+        # 모든 scrape target을 아래 static_configs로 명시한다. Prometheus server가
+        # Kubernetes API를 조회할 이유가 없으므로 cluster-wide RBAC와 토큰을 끈다.
+        rbac:
+          create: false
+        serviceAccounts:
+          server:
+            automountServiceAccountToken: false
         configmapReload:
           prometheus:
+            image:
+              digest: sha256:193280a33bc1acad9bc1956c5d986e3da6950882bda89311bac317998dcebf30
             resources:
               requests: { cpu: 10m, memory: 32Mi }
               limits: { memory: 64Mi }
         server:
+          automountServiceAccountToken: false
           image:
             tag: v3.11.3 # compose와 동일
+            digest: sha256:c0b857aead0d5793aa566adb8f49a9983d6f6031652098759d521a330cfa050f
           retention: 14d # compose --storage.tsdb.retention.time=14d
           extraFlags:
             - web.enable-lifecycle
@@ -82,7 +93,7 @@ spec:
           enabled: true
           image:
             repository: quay.io/prometheus/alertmanager
-            tag: v0.32.1 # compose와 동일
+            tag: v0.32.1@sha256:51a825c2a40acc3e338fdd00d622e01ec090f72be2b3ea46be0839cd47a4d286 # compose와 동일
           persistence:
             enabled: true
             storageClass: local-path
@@ -139,6 +150,7 @@ spec:
           fullnameOverride: node-exporter # extraScrapeConfigs의 타깃 이름과 일치
           image:
             tag: v1.11.1 # compose와 동일
+            digest: sha256:0f422f62c15f154af8d8572b23d623aebfb10cec73a5c654d18f911f3f9df241
           resources:
             requests: { cpu: 20m, memory: 32Mi }
             limits: { memory: 64Mi }
@@ -148,8 +160,9 @@ spec:
           image:
             sha: sha256:37d841299325c23b56e5951176ce8ef317d537447c0f1b2d2437dddbb1f51165
           rbac:
-            # Deployment는 monitoring에 두되 조회 권한은 db namespace Role로만 묶는다.
-            useClusterRole: false
+            # db Role/RoleBinding은 trusted Git source인 manifests/postgres에 둔다.
+            # 외부 monitoring chart에 db destination을 열지 않는다.
+            create: false
           collectors: [cronjobs, jobs]
           namespaces: [db]
           resources:
@@ -164,5 +177,3 @@ spec:
     automated:
       selfHeal: true
       prune: true
-    syncOptions:
-      - CreateNamespace=true

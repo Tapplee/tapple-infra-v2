@@ -1,4 +1,4 @@
-# PostgreSQL — 자작 raw manifest 디렉터리 sync (D17: Bitnami 안 씀)
+# PostgreSQL — 자작 raw manifest 디렉터리 sync (D18: Bitnami 안 씀)
 # wave 0: 시크릿 이후, 앱 이전
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -10,7 +10,7 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: default
+  project: prod
   source:
     repoURL: https://github.com/Tapplee/tapple-infra-v2.git
     targetRevision: main
@@ -22,5 +22,3 @@ spec:
     automated:
       selfHeal: true
       prune: true
-    syncOptions:
-      - CreateNamespace=true

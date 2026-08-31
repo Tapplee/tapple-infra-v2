@@ -8,6 +8,16 @@
 
 environment: preview
 
+# ApplicationSet은 GitHub PR head SHA만 제공하므로 preview는 SHA tag를 사용한다.
+# base에 prod digest가 생겨도 절대 상속하지 않는다.
+image:
+  digest: ""
+
+# 여러 PR release가 같은 namespace baseline을 서로 소유하지 않게 한다.
+# preview의 allow/default-deny 정책은 manifests/postgres-preview가 관리한다.
+networkPolicy:
+  enabled: false
+
 # 메모리 압박 시 dev 보다도 먼저 죽는다
 priorityClassName: preview-lowest
 
@@ -21,6 +31,11 @@ resources:
 
 # 프리뷰는 postgres 를 공유하고 PR 마다 database 를 나눈다 (createdb Job 이 만든다)
 createDatabase:
+  enabled: true
+  owner: tapple_preview_app
+
+# PR Application의 Deployment·Service·createdb Job이 모두 삭제된 뒤 같은 database를 정리한다.
+deleteDatabase:
   enabled: true
 
 # CPU 가 적어 기동이 느리다 — dev 와 같은 여유
@@ -36,6 +51,7 @@ env:
   # @Profile("!prod") 가 프리뷰에서 QA 엔드포인트를 열어준다(의도)
   SPRING_PROFILES_ACTIVE: dev,otel,k3s
   OTEL_URL: http://otel-collector.monitoring.svc.cluster.local:4318
+  POSTGRES_USERNAME: tapple_preview_app
   # prod 기본값을 상속해 임시 프리뷰 데이터가 자동 파기되지 않도록 명시적으로 끈다.
   MEDIA_STORAGE_PURGE_ENABLED: "false"
   PRIVACY_RETENTION_ENABLED: "false"
@@ -43,6 +59,7 @@ env:
 # 프리뷰 전용 시크릿. /tapple/preview 경로에서 ESO가 동기화한다.
 # prod 자격증명을 프리뷰에 쓰지 않는다 — 프리뷰는 URL 을 아는 사람이면 누구나 접근한다.
 existingSecret: app-secrets
+databaseSecret: postgres-app
 
 ingress:
   # ApplicationSet이 host만 만들 뿐 TLS Secret은 PR별로 만들지 않는다. 둘을 함께

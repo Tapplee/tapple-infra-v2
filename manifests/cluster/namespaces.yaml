@@ -5,7 +5,7 @@
 #   kubectl get ns -l environment=prod
 #   NetworkPolicy 의 namespaceSelector: matchLabels: {environment: prod}
 # 가 가능해지고, 그림에도 환경이 드러난다.
-# ArgoCD의 CreateNamespace=true는 Application의 destination 하나만 만든다.
+# child Application의 CreateNamespace는 PSA label 없는 namespace를 만들 수 있어 사용하지 않는다.
 # secrets Application 하나가 여러 네임스페이스에 ExternalSecret을 뿌리므로,
 # 그 전에 네임스페이스가 전부 존재해야 한다 (없으면 sync 실패 → 뒤 wave 정지).
 apiVersion: v1
@@ -14,6 +14,8 @@ metadata:
   name: app
   labels:
     environment: prod
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/audit-version: v1.36
     pod-security.kubernetes.io/warn: restricted
@@ -25,6 +27,8 @@ metadata:
   name: db
   labels:
     environment: prod
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/audit-version: v1.36
     pod-security.kubernetes.io/warn: restricted
@@ -47,6 +51,8 @@ metadata:
   name: external-secrets
   labels:
     environment: platform
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/audit-version: v1.36
     pod-security.kubernetes.io/warn: restricted
@@ -58,6 +64,8 @@ metadata:
   name: dev-app
   labels:
     environment: dev
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/audit-version: v1.36
     pod-security.kubernetes.io/warn: restricted
@@ -69,6 +77,8 @@ metadata:
   name: dev-db
   labels:
     environment: dev
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/audit-version: v1.36
     pod-security.kubernetes.io/warn: restricted
@@ -81,6 +91,8 @@ metadata:
   name: preview
   labels:
     environment: preview
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/audit-version: v1.36
     pod-security.kubernetes.io/warn: restricted

@@ -79,8 +79,6 @@ externalSecrets:
       JWT_REFRESH_EXPIRATION: JWT_REFRESH_EXPIRATION
       JWT_SECRET_KEY: JWT_SECRET_KEY
       OTEL_AUTH_HEADER: OTEL_AUTH_HEADER
-      POSTGRES_PASSWORD: POSTGRES_PASSWORD
-      POSTGRES_USERNAME: POSTGRES_USERNAME
       PUBLIC_API_ORIGIN: PUBLIC_API_ORIGIN
       PUBLIC_ASSET_ORIGIN: PUBLIC_ASSET_ORIGIN
       PUBLIC_MEDIA_ORIGIN: PUBLIC_MEDIA_ORIGIN
@@ -98,12 +96,43 @@ externalSecrets:
       SLUG_RESERVATION_HMAC_KEY_VERSION: SLUG_RESERVATION_HMAC_KEY_VERSION
       SWAGGER_REDIRECT_URI: SWAGGER_REDIRECT_URI
 
+  # 앱 DB 비밀번호는 일반 앱 시크릿 및 DB 관리자 자격증명과 분리한다.
+  # 사용자명은 비밀이 아니므로 tapple-server values와 role bootstrap Job에 고정한다.
+  - name: postgres-app
+    namespace: app
+    store: aws-secretsmanager
+    targetName: postgres-app
+    remoteKey: postgres-app
+    data: &postgresAppData
+      POSTGRES_PASSWORD: POSTGRES_PASSWORD
+
+  - name: postgres-app
+    namespace: db
+    store: aws-secretsmanager
+    targetName: postgres-app
+    remoteKey: postgres-app
+    data: *postgresAppData
+
   - name: app-secrets
     namespace: dev-app
     store: aws-secretsmanager
     targetName: app-secrets
     remoteKey: app-secrets
     data: *appData
+
+  - name: postgres-app
+    namespace: dev-app
+    store: aws-secretsmanager
+    targetName: postgres-app
+    remoteKey: postgres-app
+    data: *postgresAppData
+
+  - name: postgres-app
+    namespace: dev-db
+    store: aws-secretsmanager
+    targetName: postgres-app
+    remoteKey: postgres-app
+    data: *postgresAppData
 
   - name: app-secrets
     namespace: preview
@@ -124,8 +153,6 @@ externalSecrets:
       JWT_REFRESH_EXPIRATION: JWT_REFRESH_EXPIRATION
       JWT_SECRET_KEY: JWT_SECRET_KEY
       OTEL_AUTH_HEADER: OTEL_AUTH_HEADER
-      POSTGRES_PASSWORD: POSTGRES_PASSWORD
-      POSTGRES_USERNAME: POSTGRES_USERNAME
       REFRESH_COOKIE_SAME_SITE: REFRESH_COOKIE_SAME_SITE
       REFRESH_COOKIE_SECURE: REFRESH_COOKIE_SECURE
       S3_ACCESS_KEY: S3_ACCESS_KEY
@@ -137,6 +164,13 @@ externalSecrets:
       SHARE_PREVIEW_SERVICE_TOKEN: SHARE_PREVIEW_SERVICE_TOKEN
       SLUG_RESERVATION_HMAC_KEY: SLUG_RESERVATION_HMAC_KEY
       SLUG_RESERVATION_HMAC_KEY_VERSION: SLUG_RESERVATION_HMAC_KEY_VERSION
+
+  - name: postgres-app
+    namespace: preview
+    store: aws-secretsmanager
+    targetName: postgres-app
+    remoteKey: postgres-app
+    data: *postgresAppData
 
   - name: postgres-secrets
     namespace: db

@@ -9,18 +9,18 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: default
+  project: monitoring
   source:
     repoURL: https://grafana.github.io/helm-charts
     chart: tempo
-    # TODO(Phase 6): 설치 시점 최신 안정 차트 버전 고정
+    # upgrade는 이 version과 CI render contract을 같은 PR에서 바꾼다.
     targetRevision: 1.18.0
     helm:
       valuesObject:
         fullnameOverride: tempo
         tempo:
           repository: grafana/tempo
-          tag: 2.10.5 # compose와 동일
+          tag: 2.10.5@sha256:ee21727732c7a7199cb71c3eee9153bbf23f9b0b87619f0555a0cf21a67f1a33 # compose와 동일
           reportingEnabled: false
           retention: 168h # 로컬 tempo.yml block_retention 그대로 (7d)
           # 100% trace의 초기 메모리 예산에서도 ballast는 256Mi만 고정하고 나머지를
@@ -53,5 +53,3 @@ spec:
     automated:
       selfHeal: true
       prune: true
-    syncOptions:
-      - CreateNamespace=true

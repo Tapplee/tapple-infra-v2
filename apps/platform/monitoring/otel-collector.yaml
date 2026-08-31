@@ -10,11 +10,11 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: default
+  project: monitoring
   source:
     repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts
     chart: opentelemetry-collector
-    # TODO(Phase 6): 설치 시점 helm search로 최신 안정 버전 고정
+    # upgrade는 이 version과 CI render contract을 같은 PR에서 바꾼다.
     targetRevision: 0.156.2
     helm:
       valuesObject:
@@ -25,6 +25,7 @@ spec:
           # compose와 같은 contrib 배포판. k3s에서는 sampling processor를 두지 않는다.
           repository: otel/opentelemetry-collector-contrib
           tag: 0.152.0 # compose와 동일
+          digest: sha256:f41d7995565df3733b7568702073a9c490792f9c6ac60684fe6a4da21a313f8d
         resources:
           # trace 100% 수집의 초기 예산. 실제 accepted/refused/export 지표로 재조정한다.
           requests: { cpu: 250m, memory: 512Mi }
@@ -93,5 +94,3 @@ spec:
     automated:
       selfHeal: true
       prune: true
-    syncOptions:
-      - CreateNamespace=true

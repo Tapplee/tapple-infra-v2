@@ -4,10 +4,12 @@ metadata:
   name: {{ include "tapple-server.fullname" . }}
   labels:
     {{- include "tapple-server.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
 spec:
   type: {{ .Values.service.type }}
   selector:
     {{- include "tapple-server.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: server
   ports:
     - name: http
       port: {{ .Values.service.port }}
