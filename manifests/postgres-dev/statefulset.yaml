@@ -37,7 +37,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: postgres
-          image: postgres:16 # ← prod와 동일하게 유지할 것
+          image: postgres:16.15-bookworm@sha256:bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825 # ← prod와 동일하게 유지할 것
           args:
             - -c
             - shared_buffers=512MB # limits.memory 2Gi의 25%
@@ -95,9 +95,11 @@ spec:
               mountPath: /var/run/postgresql
       volumes:
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 256Mi
         - name: run
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 64Mi
   volumeClaimTemplates:
     - metadata:
         name: data

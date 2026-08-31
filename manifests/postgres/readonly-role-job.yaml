@@ -44,7 +44,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: psql
-          image: postgres:16 # StatefulSet 과 동일 버전
+          image: postgres:16.15-bookworm@sha256:bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825 # StatefulSet 과 동일 버전
           command: ["sh", "-c"]
           args:
             - |

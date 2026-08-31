@@ -34,8 +34,8 @@ spec:
         - name: postgres
           # 메이저 16 = 현 운영(홈서버 docker-compose-prod.yml의 postgres:16-alpine)과 동일.
           # 이전과 메이저 업그레이드를 한 번에 하지 않으려고 맞춘 값 — alpine이 아닌 이유는 collation(musl vs glibc).
-          # TODO: 마이너까지 고정할지는 컷오버 직전 결정
-          image: postgres:16
+          # 공식 16/bookworm multi-arch manifest를 digest로 고정한다. helper Job도 같은 digest를 쓴다.
+          image: postgres:16.15-bookworm@sha256:bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825
           args:
             # 튜닝은 ConfigMap 대신 args로 — 파일 하나 덜 만들고 값이 여기 다 보임 (계획 Phase 3의 "튜닝 ConfigMap"을 단순화)
             # 아래 값은 limits.memory 8Gi 기준 (계획 §4-2). 메모리를 바꾸면 같이 조정
@@ -109,9 +109,11 @@ spec:
               mountPath: /var/run/postgresql
       volumes:
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 256Mi
         - name: run
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 64Mi
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -33,14 +33,14 @@ service:
   port: 80
 
 ingress:
-  enabled: true
+  # fail-closed 기본값. 실제 host·origin TLS Secret이 준비된 뒤 환경별 values에서만 켠다.
+  enabled: false
   className: traefik # k3s 내장 Traefik
-  # 운영 전 fail-safe placeholder. IDC DNS/TLS 확정 뒤 실제 1단 host로 교체한다.
+  # enabled=true이면 template이 .invalid host, 빈 TLS, non-Traefik class를 거부한다.
   host: api.example.invalid
-  # Cloudflare origin cert 시크릿 (실도메인 붙일 때 생성)
   tls: []
-  # - secretName: cloudflare-origin-cert
-  #   hosts: [api.example.com]
+  # - secretName: cloudflare-origin-cert # 같은 namespace의 kubernetes.io/tls Secret
+  #   hosts: [api.example.com]            # 위 ingress.host와 정확히 일치해야 함
 
 # 계획 §4-2 — Burstable (8 vCPU / 32GB 노드 기준)
 # JVM은 -XX:MaxRAMPercentage=75 → limits 6Gi면 힙 ~4.5Gi

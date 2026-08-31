@@ -4,6 +4,102 @@ argocd_namespace: argocd
 argocd_install_manifest_url: >-
   https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
 argocd_install_manifest_checksum: sha256:a32bf36a437071a1f563ebf9e81c8a39fba9057c17db7d5d041afb7b6e3f4afe
+# Upstream install.yaml은 resources를 두지 않는다. 단일 노드에서 하나의 컴포넌트가
+# 나머지 control plane을 밀어내지 않도록 설치 직후 모든 app workload를 bounded로 만든다.
+# 새 Argo CD 버전에서 컨테이너가 추가되면 CI의 coverage contract가 실패해야 한다.
+argocd_resource_patches:
+  - kind: Deployment
+    name: argocd-applicationset-controller
+    patch:
+      spec:
+        template:
+          spec:
+            containers:
+              - name: argocd-applicationset-controller
+                resources:
+                  requests: { cpu: 50m, memory: 64Mi }
+                  limits: { cpu: 500m, memory: 256Mi }
+  - kind: Deployment
+    name: argocd-dex-server
+    patch:
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: copyutil
+                resources:
+                  requests: { cpu: 10m, memory: 16Mi }
+                  limits: { cpu: 100m, memory: 64Mi }
+            containers:
+              - name: dex
+                resources:
+                  requests: { cpu: 10m, memory: 32Mi }
+                  limits: { cpu: 200m, memory: 128Mi }
+  - kind: Deployment
+    name: argocd-notifications-controller
+    patch:
+      spec:
+        template:
+          spec:
+            containers:
+              - name: argocd-notifications-controller
+                resources:
+                  requests: { cpu: 10m, memory: 32Mi }
+                  limits: { cpu: 200m, memory: 128Mi }
+  - kind: Deployment
+    name: argocd-redis
+    patch:
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: secret-init
+                resources:
+                  requests: { cpu: 10m, memory: 16Mi }
+                  limits: { cpu: 100m, memory: 64Mi }
+            containers:
+              - name: redis
+                resources:
+                  requests: { cpu: 50m, memory: 64Mi }
+                  limits: { cpu: 500m, memory: 256Mi }
+  - kind: Deployment
+    name: argocd-repo-server
+    patch:
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: copyutil
+                resources:
+                  requests: { cpu: 10m, memory: 16Mi }
+                  limits: { cpu: 100m, memory: 64Mi }
+            containers:
+              - name: argocd-repo-server
+                resources:
+                  requests: { cpu: 100m, memory: 128Mi }
+                  limits: { cpu: '1', memory: 512Mi }
+  - kind: Deployment
+    name: argocd-server
+    patch:
+      spec:
+        template:
+          spec:
+            containers:
+              - name: argocd-server
+                resources:
+                  requests: { cpu: 50m, memory: 64Mi }
+                  limits: { cpu: 500m, memory: 256Mi }
+  - kind: StatefulSet
+    name: argocd-application-controller
+    patch:
+      spec:
+        template:
+          spec:
+            containers:
+              - name: argocd-application-controller
+                resources:
+                  requests: { cpu: 100m, memory: 256Mi }
+                  limits: { cpu: '1', memory: 1Gi }
 argocd_health_manifest_path: "{{ playbook_dir }}/../../manifests/cluster/argocd-health.yaml"
 argocd_root_app_manifest_path: "{{ playbook_dir }}/../../bootstrap/root-app.yaml"
 argocd_root_app_ready_timeout: 30m

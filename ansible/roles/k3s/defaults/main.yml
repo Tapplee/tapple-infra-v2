@@ -8,4 +8,10 @@ k3s_service_cidr: 10.43.0.0/16
 k3s_system_reserved_cpu: 1000m
 k3s_system_reserved_memory: 2Gi
 k3s_eviction_memory_available: 1Gi
+# eviction-hard 값을 하나라도 덮어쓰면 kubelet의 나머지 기본값은 0이 된다.
+# 메모리 기준을 1Gi로 높이되 Linux 기본 disk/inode 보호선은 전부 명시한다.
+k3s_eviction_nodefs_available: 10%
+k3s_eviction_imagefs_available: 15%
+k3s_eviction_nodefs_inodes_free: 5%
+k3s_eviction_imagefs_inodes_free: 5%
 k3s_ready_timeout: 300s

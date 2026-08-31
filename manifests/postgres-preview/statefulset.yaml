@@ -42,7 +42,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: postgres
-          image: postgres:16 # prod·dev 와 같은 메이저 — 마이그레이션이 같게 돌아야 한다
+          image: postgres:16.15-bookworm@sha256:bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825 # prod·dev 와 같은 이미지
           args:
             - -c
             - shared_buffers=256MB
@@ -103,9 +103,11 @@ spec:
               mountPath: /var/run/postgresql
       volumes:
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 256Mi
         - name: run
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 64Mi
   volumeClaimTemplates:
     - metadata:
         name: data

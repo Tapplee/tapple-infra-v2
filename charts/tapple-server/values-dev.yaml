@@ -7,8 +7,8 @@ image:
   tag: "798bd9484b43"
 
 ingress:
-  enabled: true
-  # 운영 전 fail-safe placeholder. IDC DNS/TLS 확정 뒤 실제 dev host로 교체한다.
+  # 실제 dev host와 origin TLS Secret을 함께 준비하기 전에는 외부 노출하지 않는다.
+  enabled: false
   host: dev-api.example.invalid
 
 # prod의 1/2. 압박 시 가장 먼저 축출되도록 우선순위도 최하

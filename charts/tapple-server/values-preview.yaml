@@ -42,6 +42,8 @@ env:
 existingSecret: app-secrets
 
 ingress:
-  enabled: true
+  # ApplicationSet이 host만 만들 뿐 TLS Secret은 PR별로 만들지 않는다. 둘을 함께
+  # 설계하기 전에는 preview Service를 클러스터 밖에 노출하지 않는다.
+  enabled: false
   className: traefik
   tls: []

@@ -8,6 +8,63 @@
       - ansible_facts.architecture in ['x86_64', 'amd64']
     fail_msg: This bootstrap supports only x86_64 Ubuntu 22.04 or 24.04 hosts.
 
+- name: Require the Cloudflare-only public port contract before host mutation
+  ansible.builtin.assert:
+    that:
+      - common_public_tcp_ports == [443]
+      - common_cloudflare_origin_ipv4_cidrs | length == 15
+      - common_cloudflare_origin_ipv6_cidrs | length == 7
+      - >-
+        ((common_cloudflare_origin_ipv4_cidrs
+        + common_cloudflare_origin_ipv6_cidrs) | unique | length)
+        == ((common_cloudflare_origin_ipv4_cidrs
+        + common_cloudflare_origin_ipv6_cidrs) | length)
+    fail_msg: >-
+      The origin firewall is fail-closed: port 80 and generic public ports are
+      forbidden, and 443 must use the reviewed Cloudflare IPv4/IPv6 ranges.
+  delegate_to: localhost
+  become: false
+  tags:
+    - preflight
+
+- name: Validate the pinned Cloudflare origin CIDRs before host mutation
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import ipaddress
+        import sys
+
+        raw = sys.argv[1]
+        expected_version = int(sys.argv[2])
+        try:
+            network = ipaddress.ip_network(raw, strict=True)
+        except ValueError as error:
+            raise SystemExit(f"invalid Cloudflare CIDR {raw!r}: {error}") from error
+        if network.version != expected_version:
+            raise SystemExit(
+                f"Cloudflare CIDR {raw!r} is not IPv{expected_version}"
+            )
+        if network.prefixlen == 0 or not network.is_global:
+            raise SystemExit(f"unsafe Cloudflare CIDR: {raw!r}")
+        if raw != network.with_prefixlen:
+            raise SystemExit(
+                f"Cloudflare CIDR must be canonical: {raw!r}; "
+                f"use {network.with_prefixlen!r}"
+            )
+      - "{{ item }}"
+      - "{{ 6 if ':' in item else 4 }}"
+  loop: >-
+    {{ common_cloudflare_origin_ipv4_cidrs
+       + common_cloudflare_origin_ipv6_cidrs }}
+  changed_when: false
+  check_mode: false
+  delegate_to: localhost
+  become: false
+  tags:
+    - preflight
+
 - name: Install host prerequisites
   ansible.builtin.apt:
     name: "{{ common_packages }}"
@@ -76,7 +133,7 @@
   ansible.builtin.set_fact:
     common_expected_admin_ssh_ufw_rules: []
     common_expected_k3s_api_ufw_rules: []
-    common_expected_public_ufw_rules: []
+    common_expected_cloudflare_https_ufw_rules: []
     common_expected_internal_ufw_rules: []
 
 - name: Build the desired administrator SSH firewall rules
@@ -97,12 +154,16 @@
             ~ ' to any port 6443 proto tcp'] }}
   loop: "{{ common_k3s_api_cidrs }}"
 
-- name: Build the desired public firewall rules
+- name: Build the desired Cloudflare HTTPS firewall rules
   ansible.builtin.set_fact:
-    common_expected_public_ufw_rules: >-
-      {{ common_expected_public_ufw_rules
-         + ['ufw allow ' ~ (item | string) ~ '/tcp'] }}
-  loop: "{{ common_public_tcp_ports }}"
+    common_expected_cloudflare_https_ufw_rules: >-
+      {{ common_expected_cloudflare_https_ufw_rules
+         + ['ufw allow from '
+            ~ (item | regex_replace('/32$', '') | regex_replace('/128$', ''))
+            ~ ' to any port 443 proto tcp'] }}
+  loop: >-
+    {{ common_cloudflare_origin_ipv4_cidrs
+       + common_cloudflare_origin_ipv6_cidrs }}
 
 - name: Build the desired K3s internal firewall rules
   ansible.builtin.set_fact:
@@ -119,7 +180,7 @@
     common_expected_inbound_ufw_rules: >-
       {{ common_expected_admin_ssh_ufw_rules
          + common_expected_k3s_api_ufw_rules
-         + common_expected_public_ufw_rules
+         + common_expected_cloudflare_https_ufw_rules
          + common_expected_internal_ufw_rules }}
 
 - name: Read configured UFW rules before any firewall mutation
@@ -190,17 +251,26 @@
   register: common_k3s_api_ufw_rules
   changed_when: "'Rule added' in common_k3s_api_ufw_rules.stdout"
 
-- name: Allow public HTTP and HTTPS traffic
+- name: Allow origin HTTPS only from Cloudflare networks
   ansible.builtin.command:
     argv:
       - ufw
       - allow
-      - "{{ item }}/tcp"
+      - from
+      - "{{ item }}"
+      - to
+      - any
+      - port
+      - '443'
+      - proto
+      - tcp
       - comment
-      - tapple-public
-  loop: "{{ common_public_tcp_ports }}"
-  register: common_public_ufw_rules
-  changed_when: "'Rule added' in common_public_ufw_rules.stdout"
+      - tapple-cloudflare-https
+  loop: >-
+    {{ common_cloudflare_origin_ipv4_cidrs
+       + common_cloudflare_origin_ipv6_cidrs }}
+  register: common_cloudflare_https_ufw_rules
+  changed_when: "'Rule added' in common_cloudflare_https_ufw_rules.stdout"
 
 - name: Allow the K3s pod and service networks on the node
   ansible.builtin.command:
@@ -308,9 +378,18 @@
         common_effective_ufw_status.stdout_lines
         | select('match', '^6443(?:/tcp)?(?: \\(v6\\))?\\s+(?:ALLOW|LIMIT)(?: IN)?\\s+Anywhere')
         | list | length == 0
+      - >-
+        common_effective_ufw_status.stdout_lines
+        | select('match', '^80(?:/tcp)?(?: \\(v6\\))?\\s+(?:ALLOW|LIMIT)(?: IN)?\\s+Anywhere')
+        | list | length == 0
+      - >-
+        common_effective_ufw_status.stdout_lines
+        | select('match', '^443(?:/tcp)?(?: \\(v6\\))?\\s+(?:ALLOW|LIMIT)(?: IN)?\\s+Anywhere')
+        | list | length == 0
     fail_msg: >-
       UFW must be active, allow both internal K3s CIDRs, and never expose SSH
-      or the Kubernetes API to Anywhere. Use explicit CIDRs only.
+      Kubernetes API, HTTP, or HTTPS to Anywhere. Origin HTTPS must use only the
+      pinned Cloudflare CIDRs.
 
 - name: Verify every administrator SSH network is allowed
   ansible.builtin.assert:
@@ -327,6 +406,16 @@
         (item | regex_replace('/32$', '') | regex_replace('/128$', ''))
         in common_effective_ufw_status.stdout
   loop: "{{ common_k3s_api_cidrs }}"
+
+- name: Verify every Cloudflare origin network is allowed
+  ansible.builtin.assert:
+    that:
+      - >-
+        (item | regex_replace('/32$', '') | regex_replace('/128$', ''))
+        in common_effective_ufw_status.stdout
+  loop: >-
+    {{ common_cloudflare_origin_ipv4_cidrs
+       + common_cloudflare_origin_ipv6_cidrs }}
 
 - name: Ensure the OpenSSH drop-in directory exists
   ansible.builtin.file:
