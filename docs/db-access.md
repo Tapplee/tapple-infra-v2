@@ -196,13 +196,13 @@ kubectl delete sa teammate -n team-access
 # ArgoCD selfHeal 이 곧 되살리므로, 되살아난 뒤 새로 발급하면 이전 토큰은 전부 무효
 ```
 
-더 이상 쓰지 않는 개인/VPN CIDR도 inventory와 UFW에서 제거한다. 현재 bootstrap role은
-안전상 기존 UFW 규칙을 자동 purge하지 않으므로, 목록에서 뺀 CIDR의 번호를 확인해
-명시적으로 삭제한 뒤 다시 상태를 검증한다.
+더 이상 쓰지 않는 개인/VPN CIDR은 inventory에서 제거하고 playbook을 다시 실행한다.
+전용 노드의 UFW 인바운드 allow는 Ansible이 전부 소유하므로, 원하는 규칙을 먼저 보장한 뒤
+inventory에 없는 과거 규칙을 자동으로 제거하고 최종 상태를 검증한다.
 
 ```bash
-ufw status numbered
-ufw delete <삭제할-규칙번호>
+cd /path/to/tapple-infra-v2/ansible
+ansible-playbook playbooks/bootstrap.yml
 ufw status verbose
 ```
 
@@ -287,7 +287,7 @@ Secret 갱신만으로 PostgreSQL role 비밀번호는 바뀌지 않는다. 마�
    ```bash
    kubectl rollout restart deployment/tapple-server -n app
    kubectl rollout status deployment/tapple-server -n app --timeout=300s
-   curl -fsS https://api.example.com/actuator/health
+   curl -fsS https://api.example.invalid/actuator/health
    ```
 
 `\password` 전에 실패하면 앱을 재시작하지 말고 두 Secrets Manager Secret을 모두

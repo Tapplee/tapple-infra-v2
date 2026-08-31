@@ -13,6 +13,3 @@ common_k3s_api_cidrs: []
 common_public_tcp_ports:
   - 80
   - 443
-
-common_k3s_cluster_cidr: "{{ k3s_cluster_cidr | default('10.42.0.0/16') }}"
-common_k3s_service_cidr: "{{ k3s_service_cidr | default('10.43.0.0/16') }}"

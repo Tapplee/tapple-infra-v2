@@ -111,6 +111,7 @@
       - "{{ argocd_namespace }}"
       - --timeout=420s
   loop:
+    - argocd-applicationset-controller
     - argocd-repo-server
     - argocd-server
   changed_when: false

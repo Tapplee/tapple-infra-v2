@@ -1,5 +1,6 @@
 # pg_dump → 노드 밖 S3 호환 오브젝트 스토리지 (계획 D14, Phase 9)
-# 매일 03:00 KST(= 18:00 UTC). 배포 직전 백업은 CI가 `kubectl create job --from=cronjob/pg-backup`으로 트리거
+# 컷오버 후 매일 03:00 KST(= 18:00 UTC). 그 전에는 suspend하고 수동 restore 리허설부터 통과시킨다.
+# 배포 직전 백업은 CI가 `kubectl create job --from=cronjob/pg-backup`으로 트리거
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -16,6 +17,9 @@ spec:
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pg-backup
     spec:
       backoffLimit: 2
       activeDeadlineSeconds: 1800
@@ -28,6 +32,9 @@ spec:
           automountServiceAccountToken: false
           securityContext:
             runAsNonRoot: true
+            # dump(999)와 upload(1000)가 같은 emptyDir를 안전하게 공유한다.
+            fsGroup: 2000
+            fsGroupChangePolicy: OnRootMismatch
             seccompProfile:
               type: RuntimeDefault
           initContainers:
@@ -39,11 +46,22 @@ spec:
                 # 대기 루프 이유는 readonly-role-job.yaml 참고 — NetworkPolicy 가 새 파드 IP 를
                 # 허용 목록에 넣기까지 몇 초 걸린다. 지금까지는 이미지 풀 시간이 그 창을 가려줬을 뿐이다.
                 - |
+                  set -eu
+                  database_ready=false
                   for i in $(seq 1 40); do
-                    pg_isready -q && break
+                    if pg_isready -q; then
+                      database_ready=true
+                      break
+                    fi
                     sleep 3
                   done
-                  pg_dump -Fc -f "/backup/taple-$(date +%Y%m%d-%H%M%S).dump" && ls -lh /backup
+                  test "$database_ready" = true
+                  backup_file="/backup/taple-$(date +%Y%m%d-%H%M%S).dump"
+                  pg_dump -Fc -f "$backup_file"
+                  test -s "$backup_file"
+                  sha256sum "$backup_file" >"$backup_file.sha256"
+                  sha256sum -c "$backup_file.sha256"
+                  ls -lh /backup
               env:
                 - name: PGHOST
                   value: postgres.db.svc.cluster.local
@@ -75,7 +93,10 @@ spec:
               command: ["sh", "-c"]
               args:
                 # TODO(Phase 9): 보존 정책(일 7 / 주 4) — 버킷 lifecycle 지원 확인, 미지원 시 여기서 오래된 키 삭제
-                - aws s3 cp /backup/ "s3://${S3_BUCKET}/pg-backup/" --recursive --endpoint-url "${S3_ENDPOINT}"
+                - |
+                  set -eu
+                  aws s3 cp /backup/ "s3://${S3_BUCKET}/pg-backup/" \
+                    --recursive --endpoint-url "${S3_ENDPOINT}"
               env:
                 - name: HOME
                   value: /tmp

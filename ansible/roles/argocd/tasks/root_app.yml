@@ -33,3 +33,63 @@
     stdin: "{{ lookup('ansible.builtin.file', argocd_root_app_manifest_path) }}"
   when: argocd_root_app_diff.rc == 1
   changed_when: true
+
+- name: Request a hard refresh of the root Application
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - annotate
+      - application/root
+      - -n
+      - "{{ argocd_namespace }}"
+      - argocd.argoproj.io/refresh=hard
+      - --overwrite
+  changed_when: false
+
+- name: Wait for Argo CD to consume the hard refresh
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - get
+      - application/root
+      - -n
+      - "{{ argocd_namespace }}"
+      - -o
+      - json
+  register: argocd_root_app_refresh_state
+  changed_when: false
+  until:
+    - >-
+      (argocd_root_app_refresh_state.stdout | from_json)
+      .get('metadata', {}).get('annotations', {})
+      .get('argocd.argoproj.io/refresh', '') == ''
+  retries: "{{ argocd_root_app_refresh_retries }}"
+  delay: "{{ argocd_root_app_refresh_delay }}"
+
+- name: Wait for the root Application to finish syncing
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - wait
+      - application/root
+      - -n
+      - "{{ argocd_namespace }}"
+      - "--for=jsonpath={.status.sync.status}=Synced"
+      - "--timeout={{ argocd_root_app_ready_timeout }}"
+  changed_when: false
+
+- name: Wait for the root Application and all health-gated children
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - wait
+      - application/root
+      - -n
+      - "{{ argocd_namespace }}"
+      - "--for=jsonpath={.status.health.status}=Healthy"
+      - "--timeout={{ argocd_root_app_ready_timeout }}"
+  changed_when: false

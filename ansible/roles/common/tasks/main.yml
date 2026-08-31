@@ -72,6 +72,86 @@
     mode: '0644'
   notify: Apply Kubernetes kernel parameters
 
+- name: Initialize the desired administrator and Kubernetes API firewall rules
+  ansible.builtin.set_fact:
+    common_expected_admin_ssh_ufw_rules: []
+    common_expected_k3s_api_ufw_rules: []
+    common_expected_public_ufw_rules: []
+    common_expected_internal_ufw_rules: []
+
+- name: Build the desired administrator SSH firewall rules
+  ansible.builtin.set_fact:
+    common_expected_admin_ssh_ufw_rules: >-
+      {{ common_expected_admin_ssh_ufw_rules
+         + ['ufw allow from '
+            ~ (item | regex_replace('/32$', '') | regex_replace('/128$', ''))
+            ~ ' to any port 22 proto tcp'] }}
+  loop: "{{ common_admin_ssh_cidrs }}"
+
+- name: Build the desired Kubernetes API firewall rules
+  ansible.builtin.set_fact:
+    common_expected_k3s_api_ufw_rules: >-
+      {{ common_expected_k3s_api_ufw_rules
+         + ['ufw allow from '
+            ~ (item | regex_replace('/32$', '') | regex_replace('/128$', ''))
+            ~ ' to any port 6443 proto tcp'] }}
+  loop: "{{ common_k3s_api_cidrs }}"
+
+- name: Build the desired public firewall rules
+  ansible.builtin.set_fact:
+    common_expected_public_ufw_rules: >-
+      {{ common_expected_public_ufw_rules
+         + ['ufw allow ' ~ (item | string) ~ '/tcp'] }}
+  loop: "{{ common_public_tcp_ports }}"
+
+- name: Build the desired K3s internal firewall rules
+  ansible.builtin.set_fact:
+    common_expected_internal_ufw_rules: >-
+      {{ common_expected_internal_ufw_rules
+         + ['ufw allow from '
+            ~ (item | regex_replace('/32$', '') | regex_replace('/128$', ''))] }}
+  loop:
+    - "{{ k3s_cluster_cidr }}"
+    - "{{ k3s_service_cidr }}"
+
+- name: Combine the desired inbound UFW allow rules
+  ansible.builtin.set_fact:
+    common_expected_inbound_ufw_rules: >-
+      {{ common_expected_admin_ssh_ufw_rules
+         + common_expected_k3s_api_ufw_rules
+         + common_expected_public_ufw_rules
+         + common_expected_internal_ufw_rules }}
+
+- name: Read configured UFW rules before any firewall mutation
+  ansible.builtin.command: ufw show added
+  register: common_configured_ufw_rules_initial
+  changed_when: false
+
+- name: Refuse unmanaged firewall rules that can override the declared state
+  ansible.builtin.assert:
+    that:
+      - >-
+        common_configured_ufw_rules_initial.stdout_lines
+        | select('match', '^ufw\s+route\s+(?:allow|limit)(?:\s|$)')
+        | list | length == 0
+      - >-
+        common_configured_ufw_rules_initial.stdout_lines
+        | select('match', '^ufw\s+(?:deny|reject)(?:\s|$)')
+        | reject('search', '(^|\s)out(\s|$)')
+        | list | length == 0
+      - >-
+        common_configured_ufw_rules_initial.stdout_lines
+        | select('match', '^ufw\s+(?:allow|limit)(?:\s|$)')
+        | reject('search', '(^|\s)out(\s|$)')
+        | map('regex_replace', '\s+comment\s+.*$', '')
+        | select('search', '[\x27\x22]')
+        | list | length == 0
+    fail_msg: >-
+      Found an unmanaged forwarded allow/limit rule or inbound deny/reject
+      rule, or a quoted application-profile rule that cannot be reconciled
+      safely. Resolve it through the IDC console or model it explicitly before
+      rerunning; an earlier deny can override the administrator SSH allowlist.
+
 - name: Allow SSH only from administrator networks
   ansible.builtin.command:
     argv:
@@ -134,10 +214,53 @@
       - comment
       - k3s-internal
   loop:
-    - "{{ common_k3s_cluster_cidr }}"
-    - "{{ common_k3s_service_cidr }}"
+    - "{{ k3s_cluster_cidr }}"
+    - "{{ k3s_service_cidr }}"
   register: common_internal_ufw_rules
   changed_when: "'Rule added' in common_internal_ufw_rules.stdout"
+
+- name: Read configured UFW rules after adding the desired inbound rules
+  ansible.builtin.command: ufw show added
+  register: common_configured_ufw_rules_before_cleanup
+  changed_when: false
+
+- name: Remove inbound UFW allow rules outside the declared state
+  ansible.builtin.command:
+    argv: >-
+      {{ ['ufw', '--force', 'delete']
+         + (item | regex_replace('^ufw\\s+', '')).split() }}
+  loop: >-
+    {{ common_configured_ufw_rules_before_cleanup.stdout_lines
+       | select('match', '^ufw\\s+(?:allow|limit)(?:\\s|$)')
+       | reject('search', '(^|\\s)out(\\s|$)')
+       | map('regex_replace', '\\s+comment\\s+.*$', '')
+       | list }}
+  when: item not in common_expected_inbound_ufw_rules
+  changed_when: true
+
+- name: Read the reconciled UFW rules
+  ansible.builtin.command: ufw show added
+  register: common_configured_ufw_rules_after
+  changed_when: false
+
+- name: Verify the declared inbound UFW allow rules
+  ansible.builtin.assert:
+    that:
+      - >-
+        (common_configured_ufw_rules_after.stdout_lines
+        | select('match', '^ufw\\s+(?:allow|limit)(?:\\s|$)')
+        | reject('search', '(^|\\s)out(\\s|$)')
+        | map('regex_replace', '\\s+comment\\s+.*$', '')
+        | list | difference(common_expected_inbound_ufw_rules) | length) == 0
+      - >-
+        (common_expected_inbound_ufw_rules
+        | difference(common_configured_ufw_rules_after.stdout_lines
+          | select('match', '^ufw\\s+(?:allow|limit)(?:\\s|$)')
+          | reject('search', '(^|\\s)out(\\s|$)')
+          | map('regex_replace', '\\s+comment\\s+.*$', '')
+          | list) | length) == 0
+    fail_msg: >-
+      UFW inbound allow rules differ from the Ansible-declared firewall state.
 
 - name: Inspect the effective UFW defaults
   ansible.builtin.command: ufw status verbose
@@ -175,15 +298,15 @@
       - "'Status: active' in common_effective_ufw_status.stdout"
       - "'deny (incoming)' in common_effective_ufw_status.stdout"
       - "'allow (outgoing)' in common_effective_ufw_status.stdout"
-      - common_k3s_cluster_cidr in common_effective_ufw_status.stdout
-      - common_k3s_service_cidr in common_effective_ufw_status.stdout
+      - k3s_cluster_cidr in common_effective_ufw_status.stdout
+      - k3s_service_cidr in common_effective_ufw_status.stdout
       - >-
         common_effective_ufw_status.stdout_lines
-        | select('match', '^22(?:/tcp)?(?: \\(v6\\))?\\s+ALLOW\\s+Anywhere')
+        | select('match', '^22(?:/tcp)?(?: \\(v6\\))?\\s+(?:ALLOW|LIMIT)(?: IN)?\\s+Anywhere')
         | list | length == 0
       - >-
         common_effective_ufw_status.stdout_lines
-        | select('match', '^6443(?:/tcp)?(?: \\(v6\\))?\\s+ALLOW\\s+Anywhere')
+        | select('match', '^6443(?:/tcp)?(?: \\(v6\\))?\\s+(?:ALLOW|LIMIT)(?: IN)?\\s+Anywhere')
         | list | length == 0
     fail_msg: >-
       UFW must be active, allow both internal K3s CIDRs, and never expose SSH
@@ -192,13 +315,17 @@
 - name: Verify every administrator SSH network is allowed
   ansible.builtin.assert:
     that:
-      - item in common_effective_ufw_status.stdout
+      - >-
+        (item | regex_replace('/32$', '') | regex_replace('/128$', ''))
+        in common_effective_ufw_status.stdout
   loop: "{{ common_admin_ssh_cidrs }}"
 
 - name: Verify every approved Kubernetes API network is allowed
   ansible.builtin.assert:
     that:
-      - item in common_effective_ufw_status.stdout
+      - >-
+        (item | regex_replace('/32$', '') | regex_replace('/128$', ''))
+        in common_effective_ufw_status.stdout
   loop: "{{ common_k3s_api_cidrs }}"
 
 - name: Ensure the OpenSSH drop-in directory exists
@@ -231,3 +358,15 @@
     group: root
     mode: '0644'
   when: common_cloud_config_dir.stat.isdir | default(false)
+
+- name: Apply SSH hardening before reconnect validation
+  ansible.builtin.meta: flush_handlers
+
+- name: Reset the controller SSH connection after firewall reconciliation
+  ansible.builtin.meta: reset_connection
+
+- name: Verify a fresh SSH connection through the reconciled firewall
+  ansible.builtin.wait_for_connection:
+    connect_timeout: 10
+    sleep: 2
+    timeout: 60

@@ -20,9 +20,55 @@
           - "'CHANGE_ME' not in ansible_user"
           - common_admin_ssh_cidrs | default([]) | length > 0
           - "'CHANGE_ME' not in (common_admin_ssh_cidrs | join(','))"
+          - >-
+            (common_public_tcp_ports | default([])
+            | select('integer') | list | length)
+            == (common_public_tcp_ports | length)
+          - common_public_tcp_ports | length > 0
+          - common_public_tcp_ports | min >= 1
+          - common_public_tcp_ports | max <= 65535
+          - >-
+            common_public_tcp_ports
+            | map('int')
+            | intersect([22, 6443])
+            | list | length == 0
         fail_msg: >-
           Copy inventories/idc/hosts.example.yml to hosts.yml, replace every
-          CHANGE_ME value, review the SSH allowlist, and set bootstrap_confirm=true.
+          CHANGE_ME value, keep 22/6443 out of the public port list, review the
+          firewall inputs, and set bootstrap_confirm=true.
+      delegate_to: localhost
+      become: false
+      tags:
+        - preflight
+
+    - name: Require canonical firewall CIDRs narrower than Anywhere
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import ipaddress
+            import sys
+
+            raw = sys.argv[1]
+            try:
+                network = ipaddress.ip_network(raw, strict=True)
+            except ValueError as error:
+                raise SystemExit(f"invalid CIDR {raw!r}: {error}") from error
+            if network.prefixlen == 0:
+                raise SystemExit(f"public CIDR is forbidden: {raw!r}")
+            if raw != network.with_prefixlen:
+                raise SystemExit(
+                    f"CIDR must be canonical: {raw!r}; use {network.with_prefixlen!r}"
+                )
+          - "{{ item }}"
+      loop: >-
+        {{ (common_admin_ssh_cidrs | default([]))
+           + (common_k3s_api_cidrs | default([]))
+           + [k3s_cluster_cidr | default('10.42.0.0/16')]
+           + [k3s_service_cidr | default('10.43.0.0/16')] }}
+      changed_when: false
+      check_mode: false
       delegate_to: localhost
       become: false
       tags:
@@ -31,6 +77,43 @@
     - name: Gather host facts after the local safety check
       ansible.builtin.setup:
 
+    - name: Read the active SSH connection metadata without sudo
+      ansible.builtin.command: printenv SSH_CONNECTION
+      register: bootstrap_ssh_connection
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      become: false
+
+    - name: Require the active SSH peer to remain in the administrator allowlist
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import ipaddress
+            import json
+            import sys
+
+            connection = sys.argv[1].split()
+            if len(connection) != 4:
+                raise SystemExit("SSH_CONNECTION is unavailable; refusing firewall mutation")
+            peer = ipaddress.ip_address(connection[0])
+            networks = [
+                ipaddress.ip_network(raw, strict=True)
+                for raw in json.loads(sys.argv[2])
+            ]
+            if not any(peer in network for network in networks):
+                raise SystemExit(
+                    f"active SSH peer {peer} is outside common_admin_ssh_cidrs"
+                )
+          - "{{ bootstrap_ssh_connection.stdout | default('') }}"
+          - "{{ common_admin_ssh_cidrs | to_json }}"
+      changed_when: false
+      check_mode: false
+      delegate_to: localhost
+      become: false
+
   roles:
     - role: common
     - role: k3s
@@ -38,6 +121,9 @@
     - role: external_secrets_bootstrap
 
   post_tasks:
+    - name: Flush credential rotation handlers before GitOps convergence
+      ansible.builtin.meta: flush_handlers
+
     - name: Reconcile the root Application after secret-zero exists
       ansible.builtin.include_role:
         name: argocd
