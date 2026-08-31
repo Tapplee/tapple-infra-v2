@@ -7,7 +7,7 @@ common_packages:
   - ufw
 
 common_admin_ssh_cidrs: []
-# 팀원 kubeconfig/port-forward가 필요할 때만 고정 egress 또는 VPN CIDR를 넣는다.
+# 인프라 관리자 kubeconfig가 필요할 때만 고정 VPN egress CIDR를 넣는다.
 # 빈 목록이면 Kubernetes API 6443은 외부에서 접근할 수 없다.
 common_k3s_api_cidrs: []
 # bootstrap.yml의 로컬 preflight와 호환되는 고정 계약이다. common 역할은 이 값이

@@ -12,6 +12,6 @@ all:
         bootstrap_confirm: false
         common_admin_ssh_cidrs:
           - CHANGE_ME_ADMIN_PUBLIC_IP/32
-        # Optional: fixed team/VPN egress CIDRs for restricted kubeconfig access.
+        # Optional: fixed infra-admin VPN egress CIDRs for Kubernetes API access.
         # Keep empty when everyone operates kubectl through SSH on the node.
         common_k3s_api_cidrs: []

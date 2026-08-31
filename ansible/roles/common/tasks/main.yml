@@ -232,7 +232,7 @@
   register: common_ssh_ufw_rules
   changed_when: "'Rule added' in common_ssh_ufw_rules.stdout"
 
-- name: Allow the Kubernetes API only from approved team or VPN networks
+- name: Allow the Kubernetes API only from approved infra or VPN networks
   ansible.builtin.command:
     argv:
       - ufw
