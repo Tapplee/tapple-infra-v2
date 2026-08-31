@@ -52,7 +52,8 @@ stores:
     role: tapple-secrets-shared
     prefix: /tapple/shared/
 
-# AWS Secrets Manager에는 ExternalSecret마다 JSON Secret 하나를 둔다.
+# AWS Secrets Manager에는 Kubernetes Secret 계약별 JSON source 하나를 둔다.
+# shared GHCR source 하나는 prod·dev·preview의 ExternalSecret 세 개가 읽는다.
 # Store prefix + remoteKey가 실제 이름이다. 예: /tapple/prod/ + app-secrets.
 # data는 Kubernetes Secret key → JSON property를 명시해 예상하지 않은 property 유입을 막는다.
 externalSecrets:
@@ -223,14 +224,15 @@ externalSecrets:
       admin-password: admin-password
       admin-user: admin-user
 
-  - name: grafana-google-oauth
+  - name: grafana-origin-tls
     namespace: monitoring
     store: aws-secretsmanager
-    targetName: grafana-google-oauth
-    remoteKey: grafana-google-oauth
+    targetName: grafana-origin-tls
+    remoteKey: grafana-origin-tls
+    type: kubernetes.io/tls
     data:
-      client-id: client-id
-      client-secret: client-secret
+      tls.crt: certificate
+      tls.key: private-key
 
   - name: alertmanager-discord
     namespace: monitoring

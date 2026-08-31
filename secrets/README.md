@@ -26,6 +26,11 @@ bootstrap IAM 사용자는 Secrets Manager를 직접 읽을 수 없고 `tapple-s
 아니다. 장기 access key는 Phase 1의 명시적인 보안 부채다. 키 회전 부담이나 위협 모델이
 커지면 AWS IAM Roles Anywhere의 단기 자격증명으로 교체한다.
 
+ESO controller 자체도 upstream ClusterRole로 모든 namespace의 Kubernetes Secret을
+관리한다. 현재 클러스터는 한 운영 경계이고 외부/fork PR을 받지 않아 단일 controller를
+선택했다. namespace를 다른 팀에 위임하거나 외부 코드를 실행하는 멀티테넌트 단계에서는
+prod/non-prod controller와 bootstrap principal을 분리하는 것이 전환 조건이다.
+
 ## 환경 경계: 6 roles / 10 stores
 
 | IAM role | namespace / `SecretStore` | 허용 Secrets Manager 이름 |
@@ -35,7 +40,7 @@ bootstrap IAM 사용자는 Secrets Manager를 직접 읽을 수 없고 `tapple-s
 | `tapple-secrets-dev` | `dev-app/aws-secretsmanager` | `/tapple/dev/app-secrets` |
 | `tapple-secrets-dev` | `dev-db/aws-secretsmanager` | `/tapple/dev/postgres-secrets` |
 | `tapple-secrets-preview` | `preview/aws-secretsmanager` | `/tapple/preview/app-secrets`, `/tapple/preview/postgres-preview-secrets` |
-| `tapple-secrets-monitoring` | `monitoring/aws-secretsmanager` | `/tapple/platform/monitoring/grafana-admin`, `/tapple/platform/monitoring/grafana-google-oauth`, `/tapple/platform/monitoring/alertmanager-discord` |
+| `tapple-secrets-monitoring` | `monitoring/aws-secretsmanager` | `/tapple/platform/monitoring/grafana-admin`, `/tapple/platform/monitoring/grafana-origin-tls`, `/tapple/platform/monitoring/alertmanager-discord` |
 | `tapple-secrets-argocd` | `argocd/aws-secretsmanager` | `/tapple/platform/argocd/preview-github-token` |
 | `tapple-secrets-shared` | `app/aws-secretsmanager-shared` | `/tapple/shared/ghcr-pull` |
 | `tapple-secrets-shared` | `dev-app/aws-secretsmanager-shared` | `/tapple/shared/ghcr-pull` |
@@ -62,7 +67,7 @@ Manager의 JSON Secret 하나로 묶어 비용과 운영 오브젝트 수를 줄
 | `/tapple/preview/postgres-preview-secrets` | `POSTGRES_PASSWORD`, `POSTGRES_USER` | `preview/postgres-preview-secrets` |
 | `/tapple/shared/ghcr-pull` | `dockerconfigjson` | `app/ghcr-pull`, `dev-app/ghcr-pull`, `preview/ghcr-pull` |
 | `/tapple/platform/monitoring/grafana-admin` | `admin-password`, `admin-user` | `monitoring/grafana-admin` |
-| `/tapple/platform/monitoring/grafana-google-oauth` | `client-id`, `client-secret` | `monitoring/grafana-google-oauth` |
+| `/tapple/platform/monitoring/grafana-origin-tls` | `certificate`, `private-key` | `monitoring/grafana-origin-tls` (`kubernetes.io/tls`의 `tls.crt`, `tls.key`) |
 | `/tapple/platform/monitoring/alertmanager-discord` | `discord-webhook` | `monitoring/alertmanager-discord` |
 | `/tapple/platform/argocd/preview-github-token` | `token` | `argocd/preview-github-token` |
 
@@ -275,9 +280,12 @@ DB JSON Secret과 app JSON Secret에 새 값을 모두 준비하고, 두 Externa
 확인한 뒤 실제 role 비밀번호 변경과 앱 rollout을 연속 수행한다. 기존 Pod가 이전 env를 들고
 있기 때문에 role 변경부터 rollout 완료까지가 장애 위험 구간이다.
 
-Grafana `admin-password`도 기존 PVC 안의 사용자 비밀번호를 자동 변경하지 않는다. 최초 부팅용으로
-보고 이후 승인 사용자와 비밀번호는 Grafana에서 운영한다. Google OAuth는
-`allow_sign_up=false`라 운영자가 미리 만든 사용자만 로그인할 수 있다.
+Grafana `admin-password`는 최소 20자의 고유한 임의 값으로 생성한다. chart의 비밀번호 정책은
+bootstrap Secret을 검증하지 않는다. 이 값은 최초 부팅용이며, 기존 PVC 안의 사용자 비밀번호를
+자동 변경하지 않는다. 이후 승인 사용자와 비밀번호는 Grafana에서 운영한다. 공개 가입과 익명 접근은 꺼져 있어
+운영자가 만든 로컬 계정만 로그인한다. `grafana-origin-tls`는 Cloudflare Origin Certificate와
+private key이며 Full (strict) origin TLS에 사용한다. 상세 절차는
+[모니터링 접속 가이드](../docs/monitoring-access.md)에 있다.
 
 Secrets Manager의 자동 회전은 지금 켜지 않는다. 회전 Lambda가 IDC의 PostgreSQL·대상 서비스에
 도달할 네트워크 경로가 없고, source만 바꾸면 되는 시크릿과 대상 시스템까지 함께 바꿔야 하는
@@ -299,6 +307,11 @@ Secrets Manager의 자동 회전은 지금 켜지 않는다. 회전 Lambda가 ID
 2. `charts/tapple-secrets/values.yaml`의 ExternalSecret 계약
 3. 해당 Kubernetes Secret과 그것을 읽는 workload
 
+이 보존 정책은 JSON property를 계약에서 뺄 때 기존 Kubernetes Secret key를 자동 삭제하지
+않는다. key를 제거하는 변경은 소비 workload를 먼저 확인한 뒤 target Secret의 해당 key(또는
+target 전체)를 명시적으로 지우고 ExternalSecret을 force-sync해 현재 계약만 다시 만든 다음,
+값이 아닌 key 목록으로 결과를 검증한다.
+
 이 전환은 운영 전이므로 이전 값을 인수하지 않는다. 과거 Sealed Secrets controller를 사용한
 테스트 클러스터는 CRD보다 리소스를 먼저 지운다.
 
@@ -307,7 +320,29 @@ if kubectl api-resources --api-group=bitnami.com -o name | grep -qx sealedsecret
   kubectl delete sealedsecrets.bitnami.com --all -A
 fi
 kubectl delete application sealed-secrets -n argocd --ignore-not-found
+if kubectl get deployment sealed-secrets-controller -n kube-system >/dev/null 2>&1; then
+  kubectl wait --for=delete deployment/sealed-secrets-controller \
+    -n kube-system --timeout=180s
+fi
+
+# controller가 멈춘 것을 확인한 뒤 런타임 private sealing key도 폐기한다.
+kubectl get secret -n kube-system \
+  -l sealedsecrets.bitnami.com/sealed-secrets-key -o name
+kubectl delete secret -n kube-system \
+  -l sealedsecrets.bitnami.com/sealed-secrets-key
 ```
 
 과거 암호문은 Git 이력에 남을 수 있으므로 거기에 있던 값을 새 Secrets Manager Secret에
 재사용하지 않는다.
+
+삭제한 씰링 workflow가 사용하던 GitHub Actions repository secret도 자동으로 없어지지 않는다.
+운영 전 전환 때 이 레포의 **Settings → Secrets and variables → Actions**에서 아래 다섯 이름을
+삭제하고, 값의 원본 자격증명도 공급자에서 폐기한다.
+
+- `GHCR_USERNAME`, `GHCR_PAT`
+- `PREVIEW_GITHUB_TOKEN`
+- `GRAFANA_GOOGLE_CLIENT_ID`, `GRAFANA_GOOGLE_CLIENT_SECRET`
+
+기존 GHCR/PREVIEW PAT는 GitHub에서 revoke하고 새 fine-grained token만 Secrets Manager에 넣는다.
+과거 Grafana Google OAuth client secret도 더 이상 쓰지 않으므로 Google Cloud Console에서
+폐기한다. repository secret 삭제만으로 원본 PAT/OAuth secret이 무효화되지는 않는다.

@@ -12,15 +12,14 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://grafana.github.io/helm-charts
+    repoURL: https://grafana-community.github.io/helm-charts
     chart: grafana
-    # TODO(Phase 6): 설치 시점 최신 안정 버전 고정
-    targetRevision: 8.8.0
+    # Greenfield라 chart v13의 distroless/read-only root filesystem 기본값을 적용한다.
+    # appVersion 13.2.0은 13.0.x 이후 공개된 인증 전 DoS·XSS·정보 노출 수정을 포함한다.
+    targetRevision: 13.0.1
     helm:
       valuesObject:
         fullnameOverride: grafana
-        image:
-          tag: 13.0.1 # compose와 동일
         # Secrets Manager /tapple/platform/monitoring/grafana-admin → ExternalSecret/grafana-admin
         admin:
           existingSecret: grafana-admin
@@ -30,20 +29,45 @@ spec:
           enabled: true
           storageClassName: local-path
           size: 1Gi
+        # 단일 replica가 SQLite PVC를 공유하므로 upgrade 중 두 프로세스를 동시에 띄우지 않는다.
+        deploymentStrategy:
+          type: Recreate
         resources:
-          requests: { cpu: 100m, memory: 256Mi }
-          limits: { memory: 512Mi }
+          requests: { cpu: 100m, memory: 384Mi }
+          limits: { memory: 1Gi }
         testFramework:
           enabled: false
         # manifests/monitoring/dashboards/의 ConfigMap(label: grafana_dashboard=1)을 자동 로드
         sidecar:
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 100m, memory: 128Mi }
           dashboards:
             enabled: true
             label: grafana_dashboard
             labelValue: "1"
             searchNamespace: monitoring
+            resource: configmap
+            # Admin API reload 대신 Grafana provider의 30초 file polling을 쓰면
+            # sidecar에 admin Secret을 주입할 필요가 없다.
+            skipReload: true
             provider:
               folder: tapple
+        # chart 기본값은 sidecar에 모든 namespace의 Secret 조회권한까지 준다. 대시보드
+        # ConfigMap만 읽는 namespace Role을 chart와 같은 release에서 만들고 여기에만 bind한다.
+        rbac:
+          namespaced: true
+          useExistingRole: grafana-dashboard-reader
+        extraObjects:
+          - apiVersion: rbac.authorization.k8s.io/v1
+            kind: Role
+            metadata:
+              name: grafana-dashboard-reader
+              namespace: monitoring
+            rules:
+              - apiGroups: [""]
+                resources: ["configmaps"]
+                verbs: ["get", "list", "watch"]
         datasources:
           datasources.yaml:
             apiVersion: 1
@@ -92,9 +116,8 @@ spec:
                   nodeGraph:
                     enabled: true
         # ---------- 외부 노출 ----------
-        # Cloudflare 가 TLS 를 종료한다. 오리진(traefik)은 http 로 받으므로 tls 블록이 비어 있다.
-        # tapple.co.kr 은 Cloudflare DNS + 와일드카드 + Universal SSL 이 이미 있어서
-        # cert-manager 도 Let's Encrypt 도 필요 없다 — A 레코드 하나로 끝난다.
+        # Cloudflare Origin Certificate를 Traefik에서 종료하고 Cloudflare는 Full(strict)로 연결한다.
+        # 인증서와 private key는 Secrets Manager → ESO → grafana-origin-tls로 공급한다.
         #
         # 남은 사람 작업:
         #   Cloudflare DNS →  grafana-k3s   A   <IDC_PUBLIC_IP>   [Proxied 🟠]
@@ -102,61 +125,44 @@ spec:
         # 이름을 grafana 가 아니라 grafana-k3s 로 둔 이유: 와일드카드 때문에
         # grafana.tapple.co.kr 이 이미 홈서버로 응답한다(실측 HTTP 200). 겹치면 헷갈린다.
         #
-        # 주의 — Cloudflare Universal SSL 은 tapple.co.kr 과 *.tapple.co.kr 만 커버한다.
+        # 주의 — Cloudflare edge의 Universal SSL은 tapple.co.kr 과 *.tapple.co.kr 만 커버한다.
         # 2단(pr-27.api.tapple.co.kr)은 인증서가 안 맞는다. 앱·프리뷰를 실도메인으로 옮길 때는
         # pr-27-api.tapple.co.kr 처럼 1단으로 평평하게 잡아야 한다.
         ingress:
           enabled: true
           ingressClassName: traefik
+          annotations:
+            # Grafana host는 평문 web(:80) 라우터를 만들지 않는다.
+            traefik.ingress.kubernetes.io/router.entrypoints: websecure
           hosts:
             - grafana-k3s.tapple.co.kr
-          # Cloudflare 가 종료하므로 오리진 인증서가 없다.
-          # Full(strict) 로 올릴 때 Cloudflare Origin Certificate 를 여기 넣는다.
-          tls: []
+          tls:
+            - secretName: grafana-origin-tls
+              hosts:
+                - grafana-k3s.tapple.co.kr
 
         env:
-          # OAuth 리다이렉트와 링크 생성의 기준 주소. 없으면 구글 로그인이 엉뚱한 곳으로 돌아온다.
-          # https 로 고정하므로 port-forward(localhost:3000)로 들어오면 일부 링크가 공개 주소를 가리킨다.
+          # 링크와 secure cookie의 기준 주소. port-forward로 보면 일부 링크는 공개 주소를 가리킨다.
           GF_SERVER_ROOT_URL: https://grafana-k3s.tapple.co.kr
 
-        # 시크릿이 아직 없어도 파드는 떠야 한다 → optional: true.
-        # 없으면 변수가 비어 있을 뿐이고 auth.google 이 꺼져 있으니 무해하다.
-        # optional 을 빼면 시크릿이 없는 동안 CreateContainerConfigError 로 Grafana 가 죽는다.
-        envValueFrom:
-          GF_AUTH_GOOGLE_CLIENT_ID:
-            secretKeyRef:
-              name: grafana-google-oauth
-              key: client-id
-              optional: true
-          GF_AUTH_GOOGLE_CLIENT_SECRET:
-            secretKeyRef:
-              name: grafana-google-oauth
-              key: client-secret
-              optional: true
-
         grafana.ini:
-          auth.google:
-            # ↓ 켜는 스위치. 아래 셋이 끝난 뒤 true 로 바꾼다 ↓
-            #   ① Cloudflare A 레코드 (위 참고)
-            #   ② Google Cloud Console → 승인된 리다이렉트 URI 추가
-            #        https://grafana-k3s.tapple.co.kr/login/google
-            #   ③ Secrets Manager의 grafana-google-oauth JSON Secret 등록 후 ESO Ready 확인
-            enabled: false # ← 여기만 true 로
-            scopes: openid email profile
-            # 핵심 — 이미 등록된 사용자만 로그인된다. 구글은 "누구인지"만 증명하고
-            # "들어와도 되는지"는 Grafana 사용자 목록이 판정한다.
-            # allowed_domains 를 쓰지 않는 이유: 팀원이 gmail.com 이면 도메인 제한이
-            # 제한이 되지 않는다(구글 계정 있는 전원 통과). 명단 방식이 한 명씩 정확히 통제된다.
-            allow_sign_up: false
-            auto_login: false
+          auth.basic:
+            enabled: true
+            password_policy: true
           auth.anonymous:
-            # 반드시 꺼둔다. port-forward 방식이라면 이걸 켜서 인증을 대신했겠지만,
-            # Ingress 로 노출하는 설계에서는 켜는 순간 누구나 prod 지표를 본다.
             enabled: false
+          security:
+            cookie_secure: true
+            cookie_samesite: strict
+            strict_transport_security: true
+            strict_transport_security_max_age_seconds: "31536000"
+          plugins:
+            # distroless/read-only image에서 bundled plugin을 쓰기 갱신하지 않는다.
+            # plugin update는 검증한 Grafana image/chart upgrade와 함께 한다.
+            preinstall_auto_update: false
           users:
+            # OAuth 이메일 자동 연결은 보안상 쓰지 않는다. 운영자가 로컬 계정을 직접 만든다.
             allow_sign_up: false
-            # 로그인한 사람의 기본 권한. Editor 면 대시보드를 지울 수 있다.
-            # 대시보드 원본은 v1 레포이고 sidecar 가 주입하므로 조회만 주면 된다.
             auto_assign_org_role: Viewer
   destination:
     server: https://kubernetes.default.svc

@@ -42,7 +42,8 @@ def build(theme: dict) -> None:
         node_attr=node_attr(theme),
         edge_attr=edge_attr(theme),
     ):
-        net = Internet("인터넷")
+        public = Users("사용자")
+        edge = Internet("Cloudflare edge\nTLS proxy")
         team = Users("팀원")
 
         with Cluster("ns kube-system", graph_attr=ca):
@@ -76,7 +77,8 @@ def build(theme: dict) -> None:
         s3 = Storage("오브젝트 스토리지\n(백업 대상)")
 
         # 사용자 요청 경로
-        net >> Edge(color=DATA) >> traefik
+        public >> Edge(color=DATA, label="HTTPS") >> edge
+        edge >> Edge(color=DATA, label="HTTPS · origin TLS") >> traefik
         traefik >> Edge(color=DATA, label="Host 매칭") >> ing >> Edge(color=DATA) >> svc
         svc >> Edge(color=DATA) >> app
         app >> Edge(color=DATA, label="jdbc  postgres.db.svc") >> pg
@@ -94,14 +96,14 @@ def build(theme: dict) -> None:
         graf << Edge(color=TELEM, style="dotted") << loki
         graf << Edge(color=TELEM, style="dotted") << prom
 
-        # DB는 CIDR allowlist + 최소권한 RBAC로 API port-forward. Grafana는 승인 사용자 OAuth.
+        # DB는 CIDR allowlist + 최소권한 RBAC로 API port-forward. Grafana는 승인 로컬 계정.
         team >> Edge(color=OPS, style="dotted", label="제한 kubeconfig") >> api
         api >> Edge(color=OPS, style="dotted", label="RBAC port-forward") >> pg
         api >> Edge(color=OPS, style="dotted") >> pg_d
-        team >> Edge(color=OPS, style="dotted", label="HTTPS · Google OAuth") >> traefik
+        team >> Edge(color=OPS, style="dotted", label="HTTPS · 승인 계정") >> edge
         traefik >> Edge(color=OPS, style="dotted") >> graf_ing >> Edge(color=OPS, style="dotted") >> graf
 
-        backup >> Edge(color=OPS, label="pg_dump 매일") >> s3
+        backup >> Edge(color=OPS, label="컷오버 후 매일\n현재 suspend") >> s3
 
 
 if __name__ == "__main__":
