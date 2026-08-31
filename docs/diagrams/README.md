@@ -22,7 +22,8 @@
 - `app → otel-collector` — 같은 이유(`OTEL_URL`)
 - `root-app → Application 14개 + ApplicationSet 1개` — ArgoCD Application 의 `directory.recurse: true` 한 줄에 숨어 있다
 - `Ansible → secret-zero → STS → Secrets Manager → ESO → Kubernetes Secret` — 인증·신뢰·데이터 경계가 여러 시스템에 걸쳐 있다
-- CI/CD 전체 — GitHub Actions·ghcr·git 커밋은 클러스터 리소스가 아니다
+- CI/CD 전체 — GitHub Actions·ghcr·infra 배포 브랜치·PR·required check는 클러스터 리소스가 아니다
+- Cloudflare-only 443 UFW, 앱 Ingress enable gate, 외부 uptime monitor — host·DNS·운영 결정이라 k8s object만으로는 완전한 경로를 알 수 없다
 
 두 그림은 대체 관계가 아니라 **축이 다르다.** KubeDiagrams 는 "무엇이 있는가"(인벤토리와 소유 관계), mingrammer 는 "누가 누구를 부르는가"(트래픽과 제어).
 
@@ -80,15 +81,22 @@ desired state만으로 라이브 그림을 미리 만들지는 않는다.
 ## 흐름도 (mingrammer)
 
 ```bash
-.venv/bin/python cicd_flow.py       # 배포 파이프라인
-.venv/bin/python branch_flow.py     # 브랜치 승격·rollback
-.venv/bin/python traffic_flow.py    # 요청·관측·운영 접근 경로
+.venv/bin/python cicd_flow.py       # SHA image → infra PR → required CI → Argo pull
+.venv/bin/python branch_flow.py     # 앱 브랜치 승격·trust-root gate·rollback
+.venv/bin/python traffic_flow.py    # fail-closed ingress·Cloudflare-only 443·관측 경계
 .venv/bin/python gitops_tree.py     # root-app → wave별 child Application health gate
 .venv/bin/python preview_env.py     # PR 수명주기와 공유 preview 자원
 .venv/bin/python secret_supply_chain.py  # Ansible·AWS IAM·Secrets Manager·ESO 신뢰 경계
 ```
 
 각 스크립트가 라이트·다크 두 벌을 만든다. `theme.py` 가 그 색 세트를 갖고 있다.
+
+세 흐름도는 현재 운영 전 **desired state와 컷오버 gate**를 함께 표시한다.
+
+- 앱 Ingress 점선은 현재 리소스가 있다는 뜻이 아니라 실제 host·같은-host TLS Secret을 준비하고 `ingress.enabled=true`로 켠 뒤 생기는 경로다.
+- `origin/main` 보호는 기존 workflow를 먼저 원격에 merge하고 `Static validation` 성공을 확인한 다음, 조직 2FA를 UI에서 수동 강제하고 branch protection을 적용하는 순서다.
+- 같은 노드의 Prometheus/Alertmanager는 전체 node 소실을 알릴 수 없으므로 traffic flow의 외부 uptime monitor를 생략하지 않는다.
+- `pg-backup`은 03:00 Asia/Seoul·deadline 1시간으로 정의됐지만 `suspend:true`라 외부 backup/restore 흐름은 그리지 않는다.
 
 **배경을 `transparent` 로 두면 안 된다.** `diagrams` 의 `Cluster` 는 자체 밝은 배경색을 갖고 있어서, 글자만 밝게 바꾸면 밝은 박스 위 밝은 글자가 되어 읽을 수 없다. 페이지 배경·클러스터 배경·글자색을 한 세트로 지정한다.
 

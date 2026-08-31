@@ -1,6 +1,8 @@
 # PR 프리뷰 환경
 
-PR 하나마다 그 브랜치만의 서버가 뜬다. PR을 닫으면 사라진다.
+PR 하나마다 그 브랜치만의 앱 workload와 database가 뜬다. PR을 닫으면 workload가 사라진다.
+현재 외부 Ingress는 fail-closed 기본값으로 꺼져 있어, 아래 기본 사용법은 클러스터 내부 배포와
+승인 kubeconfig를 이용한 port-forward를 뜻한다.
 
 **해결하는 문제**: dev 환경이 하나뿐이라 여러 사람이 각자 기능을 확인하려면 `dev`에 머지해야 하고, 나중에 머지한 사람 코드가 앞사람 걸 덮는다. 뭔가 깨졌을 때 누구 코드 때문인지 구분도 안 된다.
 
@@ -17,22 +19,26 @@ PR 하나마다 그 브랜치만의 서버가 뜬다. PR을 닫으면 사라진�
 ```
 1. PR 을 연다
 2. `preview` 라벨을 붙인다          ← 이게 자리 예약이다
-3. DNS/TLS 설정 후라면 3~5분 뒤 아래 주소가 뜬다
+3. 3~5분 뒤 Application·Deployment·Service와 PR database가 뜬다
 4. 다 봤으면 라벨을 떼거나 PR 을 닫는다
 ```
 
 현재 `apps/preview/applicationset.yaml`의 host는 의도적으로 해석되지 않는
-`pr-<PR번호>-api.example.invalid`다. IDC DNS/TLS를 정한 뒤 실제 1단 preview host
-패턴으로 교체해야 URL이 열린다. 예를 들어 Cloudflare Universal SSL을 쓴다면
-`https://pr-27-api.tapple.co.kr`처럼 평평한 이름을 사용한다.
+`pr-<PR번호>-api.example.invalid`이고 `values-preview.yaml`의 `ingress.enabled`도 `false`다.
+host만 실제 값으로 바꿔서는 Ingress가 생기지 않는다. 외부 URL이 필요하면 Cloudflare proxied
+DNS, 실제 1단 host, PR별 origin TLS Secret 공급 방식을 함께 정한 뒤 명시적으로
+`ingress.enabled=true`를 넘겨야 한다. 차트는 `.invalid` host, 빈 TLS, host와 다른 TLS host,
+Traefik이 아닌 class를 거부하고 `websecure(:443)`만 사용한다. 동시에 ApplicationSet의
+`PUBLIC_*`·`CORS_ALLOWED_ORIGINS`·redirect URI도 같은 실제 HTTPS host로 바꿔야 한다.
 
-**라벨을 붙였는데 안 뜬다면** 3~5분을 기다렸는지 확인한다. 이미지 빌드(약 2~3분) → ArgoCD가 PR 목록을 다시 읽는 주기(2분)를 거쳐야 한다.
+**라벨을 붙였는데 workload가 안 뜬다면** 3~5분을 기다렸는지 확인한다. 이미지 빌드(약
+2~3분) → ArgoCD가 PR 목록을 다시 읽는 주기(2분)를 거쳐야 한다.
 
 ## 무엇이 격리되고 무엇이 공유되나
 
 | | 격리 | 비고 |
 |---|---|---|
-| 주소 | **PR마다 다름** | `pr-27...` / `pr-28...` |
+| Service | **PR마다 다름** | `tapple-server-pr-27` / `tapple-server-pr-28`; 외부 주소는 아직 없음 |
 | database | **PR마다 다름** | `tapple_pr27` / `tapple_pr28` |
 | 앱 프로세스 | **PR마다 다름** | 서로 재시작해도 무관 |
 | PostgreSQL 인스턴스 | 공유 | 한 대를 나눠 쓴다. 이게 죽으면 프리뷰 전부가 같이 죽는다 |
@@ -50,13 +56,15 @@ namespace 격리를 먼저 설계해야 한다.
 **6개.** 무제한이 아니다.
 
 ```
-상주 워크로드 뒤 노드 여유  약 8.4Gi
+명시된 상주 request 뒤 계산상 여유  약 7.9Gi
 PR 당        1Gi
 ```
 
 `preview-budget` ResourceQuota가 Deployment 6개, requests 7680Mi/1800m,
 memory limits 14Gi를 강제한다. 공유 DB와 동시에 실행되는 createdb·cleanup Job의
-여유까지 포함한 값이다. 7번째 PR에 라벨을 붙이면 Argo CD sync가 quota에서 거부된다.
+여유까지 포함한 정책 상한이다. 7번째 PR에 라벨을 붙이면 Argo CD sync가 quota에서 거부된다.
+계산에는 Traefik·일부 k3s 시스템 파드와 실제 사용량이 빠져 있으므로 실제 IDC에서 6개 동시
+안정성을 부하·eviction으로 다시 확인한다.
 안 쓰는 PR의 라벨을 떼면 자리가 난다.
 
 **`preview` 라벨이 곧 자리 예약이다.** 다 봤으면 떼는 게 예의다.
@@ -65,8 +73,8 @@ memory limits 14Gi를 강제한다. 공유 DB와 동시에 실행되는 createdb
 
 | | |
 |---|---|
-| ✅ API 호출·응답 확인 | `curl`, Postman, FE 로컬 개발 서버 연결 |
-| ✅ Swagger | `/swagger-ui.html` 로 계약 확인 |
+| ✅ API 호출·응답 확인 | 승인 kubeconfig로 Service를 port-forward한 뒤 `curl`·Postman 사용 |
+| ✅ Swagger | port-forward 주소의 `/swagger-ui.html`로 계약 확인 |
 | ✅ DB 직접 접속 | [db-access.md §3-2](db-access.md) — 쓰기도 열려 있다 |
 | ✅ 앱 로그 | `kubectl logs -n preview -l app.kubernetes.io/instance=tapple-preview-<번호>` |
 | ✅ 마이그레이션 시험 | 자기 database라 마음껏 |
@@ -76,7 +84,9 @@ memory limits 14Gi를 강제한다. 공유 DB와 동시에 실행되는 createdb
 
 ### 구글 로그인이 안 되는 이유
 
-Google OAuth는 리다이렉트 URI를 **와일드카드 없이 사전 등록**해야 하고 **HTTPS만** 받는다. 프리뷰 주소는 PR마다 달라지고 지금은 `http`다. 그래서 등록 자체가 불가능하다.
+Google OAuth는 리다이렉트 URI를 **와일드카드 없이 사전 등록**해야 하고 **HTTPS만** 받는다.
+프리뷰는 외부 Ingress가 꺼져 있고, 나중에 켜더라도 PR마다 주소가 달라 callback을 미리 열거하지
+않는다.
 
 같은 이유로 **지금 dev 환경도 로그인이 안 된다.** 프리뷰가 만든 제약이 아니라 실도메인+TLS가 붙기 전의 공통 한계다.
 
@@ -84,17 +94,22 @@ Google OAuth는 리다이렉트 URI를 **와일드카드 없이 사전 등록**�
 
 ## FE 개발자가 붙는 법
 
-프리뷰의 CORS에 로컬 개발 서버 주소가 열려 있다.
+프리뷰의 CORS에 로컬 개발 서버 주소가 열려 있다. 현재는 팀원 kubeconfig로 Service를
+port-forward한 로컬 주소를 쓴다.
 
 ```
 http://localhost:3000
 http://localhost:5173
 ```
 
-FE 로컬 `.env`의 API 주소만 바꾸면 된다.
+```bash
+kubectl -n preview port-forward service/tapple-server-pr-27 8080:80
+```
+
+FE 로컬 `.env`의 API 주소를 바꾼다.
 
 ```
-VITE_SERVER_API_URL=https://pr-27-api.tapple.co.kr/v1
+VITE_SERVER_API_URL=http://127.0.0.1:8080/v1
 ```
 
 BE가 `dev`에 머지하기를 기다리지 않고 PR 단계에서 바로 붙어볼 수 있다.
@@ -144,7 +159,9 @@ ApplicationSet 상태에 `error fetching Secret token`이 찍힌다.
 
 ### 정리
 
-PR을 닫으면 Application·Deployment·Service·Ingress는 자동으로 사라진다. **database는 남는다** — ApplicationSet이 지우는 건 k8s 리소스뿐이고 database는 postgres 안의 객체다.
+PR을 닫으면 Application·Deployment·Service가 자동으로 사라진다. Ingress는 현재 생성되지
+않으며 나중에 명시적으로 켠 경우 함께 삭제된다. **database는 남는다** — ApplicationSet이
+지우는 건 k8s 리소스뿐이고 database는 postgres 안의 객체다.
 
 `preview-db-cleanup` CronJob이 매주 월요일 04:30에 **7일 넘게 접속이 없는** `tapple_pr%` database를 지운다.
 
@@ -161,9 +178,10 @@ kubectl exec -n preview postgres-preview-0 -- psql -U tapple -d preview_bootstra
 - **PR 이벤트의 기본 체크아웃은 머지 커밋이다.** 그대로 빌드하면 이미지 태그가 머지 커밋 SHA가 되는데 ApplicationSet은 `head_sha`를 본다 → 찾는 이미지가 없다. `cd-gitops.yml`이 `ref: head.sha`로 체크아웃하는 이유
 - **PR별 URL 계열은 공유 Secrets Manager JSON에 넣지 않는다.** `CORS_ALLOWED_ORIGINS`·`PUBLIC_*`·`*_REDIRECT_URI`는 PR마다 호스트가 달라야 한다. `/tapple/preview/app-secrets`는 모든 프리뷰가 공유하므로, 이 값들은 ApplicationSet이 차트 `env`로 주입한다
 
-### 실측 기록 (2026-08-11)
+### 과거 실측 기록 (2026-08-11 · 현재 Ingress hardening 전)
 
-PR #27로 전 과정을 확인했다.
+PR #27로 당시 전 과정을 확인했다. 아래 외부 HTTP와 Ingress 삭제 결과는 2026-08-31의
+fail-closed 기본값 도입 전 snapshot이며 현재 desired state를 뜻하지 않는다.
 
 | 단계 | 결과 |
 |---|---|

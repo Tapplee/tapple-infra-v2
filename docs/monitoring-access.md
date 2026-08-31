@@ -47,7 +47,9 @@ Explore → 데이터소스 `Loki`에서 다음처럼 조회한다.
 | DB 조회 | 별도 최소권한 kubeconfig가 필요하다. [DB 접속 가이드](db-access.md) 참고 |
 | Argo CD UI 사용 | 운영자 전용이다 |
 
-프리뷰 동작 여부만 볼 때는 다음 health endpoint를 쓴다.
+프리뷰 앱 Ingress는 기본 비활성이라 아래 외부 health endpoint는 아직 열리지 않는다. 실제
+preview host와 PR별 TLS Secret 공급 방식을 정하고 `ingress.enabled=true`로 전환한 뒤에만
+사용한다.
 
 ```bash
 curl "https://pr-27-api.tapple.co.kr/actuator/health"
@@ -58,7 +60,8 @@ curl "https://pr-27-api.tapple.co.kr/actuator/health"
 Grafana Ingress는 평문 `web(:80)`에 라우팅하지 않고 `websecure(:443)`만 사용한다.
 Cloudflare edge와 IDC origin 사이도 암호화하기 위해 Cloudflare Origin Certificate를 필수
 Secrets Manager source로 둔다. 이 source가 없으면 ExternalSecret health gate가 후속 wave를
-막는다.
+막는다. 호스트 UFW도 공식 Cloudflare IPv4/IPv6 대역에서 오는 `443/tcp`만 받고 공용 80과
+source 제한 없는 443은 허용하지 않으므로, DNS proxy를 끄면 origin으로 직접 우회할 수 없다.
 
 ### 1. Origin Certificate를 Secrets Manager에 넣기
 
@@ -141,9 +144,9 @@ OSS의 로컬 인증에는 MFA가 없으므로, 팀 공개 전 Cloudflare Access
 한 겹 더 두는 것을 권장한다.
 
 - 정책은 deny-by-default로 두고 `Emails` selector에 승인 이메일을 한 명씩 넣는다.
-- Access만 켜고 끝내면 origin IP로 우회할 수 있다. Cloudflare Tunnel을 쓰거나, origin에서
-  Access token을 검증하거나, UFW 443 source를 Cloudflare 대역으로 제한해야 Access가 실제
-  보안 경계가 된다.
+- UFW는 이미 443 source를 공식 Cloudflare 대역으로 제한한다. 따라서 origin IP 직접 접속은
+  방화벽에서 막히며 Access를 우회할 수 없다. Cloudflare CIDR 변경 시 Ansible의 고정 목록을
+  공식 목록과 대조해 갱신해야 이 경계가 계속 유효하다.
 - Grafana 로컬 로그인은 두 번째 게이트로 유지한다.
 
 이 클러스터 전체 ingress를 Tunnel로 바꾸는 것은 앱 트래픽 경로까지 바꾸므로 이번 bootstrap
@@ -175,6 +178,23 @@ kubectl wait --for=condition=Ready externalsecret/grafana-origin-tls \
 
 Traefik은 TLS Secret 변경을 감시하므로 Grafana 재시작은 필요 없다. Full (strict) 상태에서
 외부 HTTPS 요청이 성공하는지 확인한 다음 Secrets Manager의 이전 version을 폐기한다.
+
+## 네트워크와 알림의 경계
+
+`monitoring` namespace는 default-deny ingress다. 같은 namespace의 수집·조회 트래픽,
+`app`·`dev-app`·`preview`에서 OTel Collector 4317/4318로 보내는 OTLP, 그리고
+`kube-system`의 Traefik에서 Grafana 3000으로 오는 경로만 별도 허용한다. egress는 제한하지
+않으며, 이 정책은 승인 계정이나 Cloudflare Access를 대신하지 않는다.
+
+현재 availability alert는 실제 scrape target인 node-exporter, Tempo, OTel Collector, Loki,
+Prometheus, Alertmanager, Grafana를 대상으로 한다. 여기에 노드 CPU·메모리·디스크, API
+오류율·지연, Hikari pool, OTel export 실패 알림이 있다. scrape하지 않는 PostgreSQL·Redis,
+외부 HTTP health나 인증서 만료는 이 Prometheus가 감시한다고 가정하지 않는다.
+
+가장 중요한 한계는 **모니터와 대상이 같은 단일 노드에 있다는 것**이다. `NodeExporterDown`은
+Prometheus가 살아 있을 때 exporter 또는 내부 scrape 경로 장애만 알려준다. 물리 노드·k3s·회선
+전체가 죽으면 Prometheus와 Alertmanager도 같이 죽어 Discord를 보낼 수 없다. 운영 전 IDC 밖의
+uptime monitor로 Cloudflare HTTPS와 별도 heartbeat를 확인해야 한다.
 
 ## 복구 시 예외 상태
 

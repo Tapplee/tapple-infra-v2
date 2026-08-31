@@ -7,8 +7,10 @@ Kubernetes API `6443`은 기본적으로 외부에 열지 않는다. 팀원 kube
 이 전용 노드의 UFW 인바운드 allow 규칙은 플레이북이 전부 소유한다. 방화벽 변경 전에
 인바운드 deny/reject, `ufw route allow/limit`, 공백 때문에 안전하게 토큰화할 수 없는 quoted
 application-profile 규칙이 있으면 IDC 콘솔에서 먼저 정리하도록 실패한다. 그 뒤 원하는
-SSH·API·80/443·K3s 내부 규칙을 추가하고 선언 목록에 없는 과거 인바운드 allow를 제거한다.
-아웃바운드 규칙은 건드리지 않는다. API 목록이 비어 있으면 외부 `6443/tcp` 규칙은 0개다.
+SSH·API·K3s 내부 규칙과 **공식 Cloudflare origin CIDR에서 오는 `443/tcp`만** 먼저 추가하고,
+선언 목록에 없는 과거 인바운드 allow를 제거한다. 공용 `80/tcp`와 origin 직접 접속용
+`443/tcp`는 열지 않는다. 아웃바운드 규칙은 건드리지 않는다. API 목록이 비어 있으면 외부
+`6443/tcp` 규칙은 0개다.
 
 ## 준비
 
@@ -32,6 +34,11 @@ cp inventories/idc/hosts.example.yml inventories/idc/hosts.yml
 CIDR는 host bit와 IPv6 축약까지 canonical 표기로 쓴다. 예를 들어
 `198.51.100.10/24`는 거부되며 `198.51.100.0/24`로 고쳐야 한다. `/0`·`Anywhere`와 public
 port 목록의 `22`·`6443`도 호스트를 바꾸기 전 preflight에서 거부한다.
+공용 포트 계약은 `[443]`으로 고정되며, 역할이 소유하는 Cloudflare IPv4/IPv6 CIDR은 canonical
+global network인지와 중복 여부까지 변경 전에 검사한다. Cloudflare가 공식 목록을 바꾸면
+[`roles/common/vars/main.yml`](roles/common/vars/main.yml)을 공식
+[IPv4](https://www.cloudflare.com/ips-v4/)·[IPv6](https://www.cloudflare.com/ips-v6/)
+목록과 대조해 갱신한 뒤 실행한다.
 원격 변경 직전에는 호스트가 보는 현재 SSH peer IP가 `common_admin_ssh_cidrs`에 포함됐는지
 확인하고, UFW·SSH 적용 후 기존 연결을 끊은 뒤 새 SSH 연결까지 성공해야 계속한다.
 
@@ -60,6 +67,17 @@ ansible-playbook playbooks/bootstrap.yml
 13개 AWS source 중 하나라도 빠지면 최대 30분 뒤 playbook이 실패한다. 실패 상태를 고친 뒤
 같은 명령을 다시 실행하면 이어서 수렴한다. 재실행 때도 과거 Healthy 상태를 오인하지 않도록
 root에 hard refresh를 요청하고 Argo CD가 그 annotation을 소비한 뒤 상태를 기다린다.
+
+K3s는 `system-reserved=cpu=1000m,memory=2Gi`와 함께 memory·disk·inode hard eviction 기준을
+모두 명시한다. 하나만 재정의하면 나머지 kubelet 기본값이 0이 되는 동작을 피하기 위해
+`memory.available<1Gi`, `nodefs.available<10%`, `imagefs.available<15%`,
+`nodefs.inodesFree<5%`, `imagefs.inodesFree<5%`를 한 묶음으로 유지한다.
+
+Argo CD upstream 설치 manifest의 모든 workload container와 init container에는 설치 직후
+resource request/limit patch를 적용한다. 새 upstream 버전에서 container가 늘어났는데 patch가
+없으면 정적 검증이 실패해야 한다. 앱·DB·모니터링·ESO·Argo CD namespace의 Pod Security
+Admission은 `restricted:v1.36` **warn/audit만** 켠다. 현재 upstream workload를 갑자기 막지
+않고 위반을 먼저 수집하려는 단계이며, audit가 깨끗해진 뒤에만 enforce를 검토한다.
 
 ## AWS bootstrap 자격증명
 
