@@ -31,6 +31,20 @@ jobs:
         with:
           version: v4.2.4
 
+      - name: Install pinned kubeconform
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="$RUNNER_TEMP/kubeconform-v0.7.0.tar.gz"
+          curl -fsSL --retry 3 \
+            https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz \
+            -o "$archive"
+          echo "c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3  $archive" \
+            | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" kubeconform
+          echo "KUBECONFORM_BIN=$RUNNER_TEMP/kubeconform" >> "$GITHUB_ENV"
+
       - name: Install Python validation tools
         run: >-
           python -m pip install --disable-pip-version-check
@@ -57,12 +71,12 @@ jobs:
             --set-string image.tag=ci
             --set-string fullnameOverride=tapple-server-pr-ci
             --set-string createDatabase.name=tapple_pr_ci
-            --set-string ingress.host=pr-ci.example.invalid
+            --set-string ingress.host=pr-ci-api.example.invalid
           )
           helm lint charts/tapple-server --strict "${preview_args[@]}"
           helm template tapple-preview charts/tapple-server \
             --namespace preview \
-            "${preview_args[@]}" >/dev/null
+            "${preview_args[@]}" >"$RUNNER_TEMP/tapple-preview-rendered.yaml"
 
       - name: Lint and render tapple-secrets
         shell: bash
@@ -71,9 +85,456 @@ jobs:
 
           secrets_args=(--set-string aws.accountId=123456789012)
           helm lint charts/tapple-secrets --strict "${secrets_args[@]}"
+          rendered_secrets="$(mktemp)"
+          trap 'rm -f "$rendered_secrets"' EXIT
           helm template tapple-secrets charts/tapple-secrets \
             --namespace argocd \
-            "${secrets_args[@]}" >/dev/null
+            "${secrets_args[@]}" >"$rendered_secrets"
+
+          python - "$rendered_secrets" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          import yaml
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              resources = [doc for doc in yaml.safe_load_all(stream) if doc]
+
+          stores = [doc for doc in resources if doc.get("kind") == "SecretStore"]
+          external_secrets = [doc for doc in resources if doc.get("kind") == "ExternalSecret"]
+          assert len(stores) == 10, len(stores)
+          assert len(external_secrets) == 15, len(external_secrets)
+          store_prefixes = {
+              (doc["metadata"]["namespace"], doc["metadata"]["name"]):
+              doc["spec"]["provider"]["aws"]["prefix"]
+              for doc in stores
+          }
+          sources = {
+              store_prefixes[
+                  (doc["metadata"]["namespace"], doc["spec"]["secretStoreRef"]["name"])
+              ] + item["remoteRef"]["key"]
+              for doc in external_secrets
+              for item in doc["spec"]["data"]
+          }
+          iam_template = Path("infra/aws/external-secrets-iam.yaml").read_text(
+              encoding="utf-8"
+          )
+          iam_sources = set(
+              re.findall(r'secret:(/tapple/[^"\n]+)-\?{6}"', iam_template)
+          )
+          assert len(iam_sources) == 13, iam_sources
+          assert sources == iam_sources, {
+              "missing_from_iam": sorted(sources - iam_sources),
+              "unused_iam_paths": sorted(iam_sources - sources),
+          }
+
+          origin_tls = next(
+              doc
+              for doc in external_secrets
+              if doc["metadata"]["namespace"] == "monitoring"
+              and doc["metadata"]["name"] == "grafana-origin-tls"
+          )
+          assert origin_tls["spec"]["target"]["template"]["type"] == "kubernetes.io/tls"
+          mappings = {
+              item["secretKey"]: item["remoteRef"]["property"]
+              for item in origin_tls["spec"]["data"]
+          }
+          assert mappings == {"tls.crt": "certificate", "tls.key": "private-key"}
+          PY
+
+      - name: Render and verify Grafana contract
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          grafana_values="$(mktemp)"
+          grafana_rendered="$(mktemp)"
+          trap 'rm -f "$grafana_values" "$grafana_rendered"' EXIT
+
+          python - "$grafana_values" <<'PY'
+          import sys
+          import yaml
+
+          with open("apps/platform/monitoring/grafana.yaml", encoding="utf-8") as stream:
+              application = yaml.safe_load(stream)
+
+          source = application["spec"]["source"]
+          assert source["repoURL"] == "https://grafana-community.github.io/helm-charts"
+          with open(sys.argv[1], "w", encoding="utf-8") as stream:
+              yaml.safe_dump(source["helm"]["valuesObject"], stream, sort_keys=False)
+          PY
+
+          helm repo add grafana-community https://grafana-community.github.io/helm-charts
+          helm template grafana grafana-community/grafana \
+            --version "$(python -c 'import yaml; print(yaml.safe_load(open("apps/platform/monitoring/grafana.yaml"))["spec"]["source"]["targetRevision"])')" \
+            --namespace monitoring \
+            --values "$grafana_values" >"$grafana_rendered"
+
+          python - "$grafana_rendered" <<'PY'
+          import sys
+          import yaml
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              resources = [doc for doc in yaml.safe_load_all(stream) if doc]
+
+          assert not any(
+              doc["kind"] in {"ClusterRole", "ClusterRoleBinding"}
+              for doc in resources
+          )
+          role = next(
+              doc for doc in resources
+              if doc["kind"] == "Role"
+              and doc["metadata"]["name"] == "grafana-dashboard-reader"
+          )
+          assert role["rules"] == [{
+              "apiGroups": [""],
+              "resources": ["configmaps"],
+              "verbs": ["get", "list", "watch"],
+          }]
+          role_binding = next(doc for doc in resources if doc["kind"] == "RoleBinding")
+          assert role_binding["roleRef"] == {
+              "apiGroup": "rbac.authorization.k8s.io",
+              "kind": "Role",
+              "name": "grafana-dashboard-reader",
+          }
+
+          deployment = next(doc for doc in resources if doc["kind"] == "Deployment")
+          assert deployment["spec"]["strategy"] == {"type": "Recreate"}
+          images = {
+              container["name"]: container["image"]
+              for container in deployment["spec"]["template"]["spec"]["containers"]
+          }
+          assert images["grafana"] == "docker.io/grafana/grafana:13.2.0-distroless"
+          containers = {
+              container["name"]: container
+              for container in deployment["spec"]["template"]["spec"]["containers"]
+          }
+          assert containers["grafana"]["resources"] == {
+              "limits": {"memory": "1Gi"},
+              "requests": {"cpu": "100m", "memory": "384Mi"},
+          }
+          assert containers["grafana-sc-dashboard"]["resources"] == {
+              "limits": {"cpu": "100m", "memory": "128Mi"},
+              "requests": {"cpu": "50m", "memory": "64Mi"},
+          }
+          sidecar_env = containers["grafana-sc-dashboard"].get("env", [])
+          assert not any(
+              item["name"].startswith("REQ_")
+              or "secretKeyRef" in item.get("valueFrom", {})
+              for item in sidecar_env
+          )
+          sidecar_settings = {item["name"]: item.get("value") for item in sidecar_env}
+          assert sidecar_settings["RESOURCE"] == "configmap"
+          assert sidecar_settings["NAMESPACE"] == "monitoring"
+          dashboard_provider = next(
+              doc["data"]["provider.yaml"]
+              for doc in resources
+              if doc["kind"] == "ConfigMap"
+              and doc["metadata"]["name"] == "grafana-config-dashboards"
+          )
+          assert "updateIntervalSeconds: 30" in dashboard_provider
+          assert containers["grafana"]["securityContext"]["readOnlyRootFilesystem"] is True
+
+          ingress = next(doc for doc in resources if doc["kind"] == "Ingress")
+          assert ingress["metadata"]["annotations"][
+              "traefik.ingress.kubernetes.io/router.entrypoints"
+          ] == "websecure"
+          assert ingress["spec"]["tls"] == [{
+              "hosts": ["grafana-k3s.tapple.co.kr"],
+              "secretName": "grafana-origin-tls",
+          }]
+
+          config = next(
+              doc["data"]["grafana.ini"]
+              for doc in resources
+              if doc["kind"] == "ConfigMap"
+              and doc["metadata"]["name"] == "grafana"
+          )
+          assert "password_policy = true" in config
+          assert "allow_sign_up = false" in config
+          assert "preinstall_auto_update = false" in config
+          assert "enabled = false" in config
+          assert "google" not in config.lower()
+          PY
+
+      - name: Verify backup and firewall safety contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from decimal import Decimal
+          import os
+          from pathlib import Path
+          import yaml
+
+          def cpu_millicores(value):
+              raw = str(value)
+              if raw.endswith("m"):
+                  return int(raw[:-1])
+              return int(Decimal(raw) * 1000)
+
+          def memory_mebibytes(value):
+              raw = str(value)
+              units = {"Ki": Decimal(1) / 1024, "Mi": 1, "Gi": 1024}
+              for suffix, multiplier in units.items():
+                  if raw.endswith(suffix):
+                      return int(Decimal(raw.removesuffix(suffix)) * multiplier)
+              raise AssertionError(f"unsupported memory quantity: {raw}")
+
+          def pod_budget(pod_spec):
+              requests_cpu = 0
+              requests_memory = 0
+              limits_memory = 0
+              for container in pod_spec.get("containers", []):
+                  resources = container["resources"]
+                  requests_cpu += cpu_millicores(resources["requests"]["cpu"])
+                  requests_memory += memory_mebibytes(
+                      resources["requests"]["memory"]
+                  )
+                  limits_memory += memory_mebibytes(
+                      resources["limits"]["memory"]
+                  )
+              return requests_cpu, requests_memory, limits_memory
+
+          with Path("manifests/postgres/backup-cronjob.yaml").open(
+              encoding="utf-8"
+          ) as stream:
+              backup = yaml.safe_load(stream)
+
+          assert backup["kind"] == "CronJob"
+          assert backup["spec"]["suspend"] is True
+          assert backup["spec"]["jobTemplate"]["metadata"]["labels"] == {
+              "app.kubernetes.io/name": "pg-backup"
+          }
+          pod = backup["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+          assert pod["securityContext"]["fsGroup"] == 2000
+          assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
+          dump = next(item for item in pod["initContainers"] if item["name"] == "dump")
+          upload = next(item for item in pod["containers"] if item["name"] == "upload")
+          assert dump["securityContext"]["runAsGroup"] != upload["securityContext"]["runAsGroup"]
+          dump_script = dump["args"][0]
+          assert dump_script.startswith("set -eu\n")
+          assert 'test -s "$backup_file"' in dump_script
+          assert "sha256sum -c" in dump_script
+          assert upload["args"][0].startswith("set -eu\n")
+          for container in (dump, upload):
+              backup_mount = next(
+                  mount for mount in container["volumeMounts"]
+                  if mount["name"] == "backup"
+              )
+              assert backup_mount["mountPath"] == "/backup"
+
+          with Path("manifests/cluster/preview-resourcequota.yaml").open(
+              encoding="utf-8"
+          ) as stream:
+              preview_quota = yaml.safe_load(stream)
+          assert preview_quota["spec"]["hard"] == {
+              "count/deployments.apps": "6",
+              "requests.cpu": "1800m",
+              "requests.memory": "7680Mi",
+              "limits.memory": "14Gi",
+          }
+
+          with Path(
+              os.environ["RUNNER_TEMP"], "tapple-preview-rendered.yaml"
+          ).open(encoding="utf-8") as stream:
+              rendered_preview = [
+                  document for document in yaml.safe_load_all(stream) if document
+              ]
+          preview_deployments = [
+              document
+              for document in rendered_preview
+              if document["kind"] == "Deployment"
+          ]
+          createdb_jobs = [
+              document for document in rendered_preview if document["kind"] == "Job"
+          ]
+          assert len(preview_deployments) == 1, len(preview_deployments)
+          assert len(createdb_jobs) == 1, len(createdb_jobs)
+          preview_deployment = preview_deployments[0]
+          createdb_job = createdb_jobs[0]
+          assert preview_deployment["spec"]["replicas"] == 1
+          with Path("manifests/postgres-preview/statefulset.yaml").open(
+              encoding="utf-8"
+          ) as stream:
+              preview_postgres = yaml.safe_load(stream)
+          with Path("manifests/postgres-preview/orphan-cleanup-cronjob.yaml").open(
+              encoding="utf-8"
+          ) as stream:
+              preview_cleanup = yaml.safe_load(stream)
+
+          deployment_limit = int(
+              preview_quota["spec"]["hard"]["count/deployments.apps"]
+          )
+          budgets = [
+              pod_budget(preview_deployment["spec"]["template"]["spec"]),
+              pod_budget(createdb_job["spec"]["template"]["spec"]),
+          ]
+          total_cpu = deployment_limit * (budgets[0][0] + budgets[1][0])
+          total_memory = deployment_limit * (budgets[0][1] + budgets[1][1])
+          total_memory_limit = deployment_limit * (budgets[0][2] + budgets[1][2])
+          for pod_spec in (
+              preview_postgres["spec"]["template"]["spec"],
+              preview_cleanup["spec"]["jobTemplate"]["spec"]["template"]["spec"],
+          ):
+              cpu, memory, memory_limit = pod_budget(pod_spec)
+              total_cpu += cpu
+              total_memory += memory
+              total_memory_limit += memory_limit
+
+          hard = preview_quota["spec"]["hard"]
+          assert total_cpu <= cpu_millicores(hard["requests.cpu"])
+          assert total_memory <= memory_mebibytes(hard["requests.memory"])
+          assert total_memory_limit <= memory_mebibytes(hard["limits.memory"])
+          print(
+              "preview quota usage: "
+              f"deployments={deployment_limit} cpu={total_cpu}m "
+              f"memory={total_memory}Mi memory-limit={total_memory_limit}Mi"
+          )
+
+          with Path("ansible/roles/common/tasks/main.yml").open(
+              encoding="utf-8"
+          ) as stream:
+              common_tasks = yaml.safe_load(stream)
+
+          task_names = [task["name"] for task in common_tasks]
+          inspect_index = task_names.index(
+              "Read configured UFW rules before any firewall mutation"
+          )
+          refuse_index = task_names.index(
+              "Refuse unmanaged firewall rules that can override the declared state"
+          )
+          mutate_index = task_names.index("Allow SSH only from administrator networks")
+          assert inspect_index < refuse_index < mutate_index
+          refusal = common_tasks[refuse_index]["ansible.builtin.assert"]
+          assertions = "\n".join(refusal["that"])
+          assert "route" in assertions
+          assert "deny|reject" in assertions
+          assert "\\x27\\x22" in assertions
+          PY
+
+      - name: Render upstream charts and validate Kubernetes schemas
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          validation_dir="$(mktemp -d)"
+          argocd_manifest="$validation_dir/argocd-install.yaml"
+          argocd_version="$(python -c 'import yaml; print(yaml.safe_load(open("ansible/roles/argocd/defaults/main.yml"))["argocd_version"])')"
+          argocd_checksum="$(python -c 'import yaml; print(yaml.safe_load(open("ansible/roles/argocd/defaults/main.yml"))["argocd_install_manifest_checksum"].removeprefix("sha256:"))')"
+          curl -fsSL --retry 3 \
+            "https://raw.githubusercontent.com/argoproj/argo-cd/$argocd_version/manifests/install.yaml" \
+            -o "$argocd_manifest"
+          echo "$argocd_checksum  $argocd_manifest" | sha256sum -c -
+          export VALIDATION_DIR="$validation_dir"
+          export ARGOCD_MANIFEST="$argocd_manifest"
+
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import os
+          import subprocess
+          import yaml
+
+          root = Path.cwd()
+          output = Path(os.environ["VALIDATION_DIR"])
+          applications = {
+              "apps/platform/external-secrets.yaml": "https://charts.external-secrets.io",
+              "apps/platform/monitoring/prometheus.yaml": "https://prometheus-community.github.io/helm-charts",
+              "apps/platform/monitoring/loki.yaml": "https://grafana.github.io/helm-charts",
+              "apps/platform/monitoring/tempo.yaml": "https://grafana.github.io/helm-charts",
+              "apps/platform/monitoring/otel-collector.yaml": "https://open-telemetry.github.io/opentelemetry-helm-charts",
+              "apps/platform/monitoring/grafana.yaml": "https://grafana-community.github.io/helm-charts",
+          }
+          rendered = []
+          for application_path, expected_repository in applications.items():
+              application = yaml.safe_load(
+                  (root / application_path).read_text(encoding="utf-8")
+              )
+              source = application["spec"]["source"]
+              assert source["repoURL"] == expected_repository, {
+                  "application": application_path,
+                  "expected": expected_repository,
+                  "actual": source["repoURL"],
+              }
+              name = application["metadata"]["name"]
+              values = output / f"{name}.values.yaml"
+              manifest = output / f"{name}.rendered.yaml"
+              values.write_text(
+                  yaml.safe_dump(
+                      source.get("helm", {}).get("valuesObject", {}),
+                      sort_keys=False,
+                  ),
+                  encoding="utf-8",
+              )
+              with manifest.open("w", encoding="utf-8") as stream:
+                  subprocess.run(
+                      [
+                          "helm",
+                          "template",
+                          name,
+                          source["chart"],
+                          "--repo",
+                          source["repoURL"],
+                          "--version",
+                          str(source["targetRevision"]),
+                          "--namespace",
+                          application["spec"]["destination"]["namespace"],
+                          "--kube-version",
+                          "1.36.3",
+                          "--include-crds",
+                          "--values",
+                          str(values),
+                      ],
+                      check=True,
+                      stdout=stream,
+                  )
+              rendered.append(str(manifest))
+
+          command = [
+              os.environ["KUBECONFORM_BIN"],
+              "-strict",
+              "-verbose",
+              "-ignore-missing-schemas",
+              "-kubernetes-version",
+              "1.36.0",
+              "-output",
+              "json",
+              "manifests",
+              "apps",
+              "bootstrap",
+              os.environ["ARGOCD_MANIFEST"],
+              *rendered,
+          ]
+          result = subprocess.run(command, text=True, capture_output=True)
+          if result.returncode:
+              print(result.stdout)
+              print(result.stderr)
+              raise SystemExit(result.returncode)
+
+          resources = json.loads(result.stdout)["resources"]
+          invalid = [
+              resource
+              for resource in resources
+              if resource["status"] not in {"statusValid", "statusSkipped"}
+          ]
+          skipped_kinds = {
+              resource["kind"]
+              for resource in resources
+              if resource["status"] == "statusSkipped"
+          }
+          assert not invalid, invalid
+          assert skipped_kinds == {
+              "Application",
+              "ApplicationSet",
+              "CustomResourceDefinition",
+          }, skipped_kinds
+          print(
+              f"validated={len(resources)} "
+              f"skipped={sum(resource['status'] == 'statusSkipped' for resource in resources)}"
+          )
+          PY
 
       - name: Lint CloudFormation
         run: cfn-lint infra/aws/external-secrets-iam.yaml
@@ -85,6 +546,33 @@ jobs:
           -i inventories/idc/hosts.example.yml
           playbooks/bootstrap.yml
           --syntax-check
+
+      - name: Test Ansible firewall preflight
+        working-directory: ansible
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          valid_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/32"],"common_k3s_api_cidrs":["203.0.113.0/24"]}'
+          broad_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/32"],"common_k3s_api_cidrs":["0.0.0.0/0"]}'
+          broad_alias_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/32"],"common_k3s_api_cidrs":["1.2.3.4/00"]}'
+          noncanonical_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/24"],"common_k3s_api_cidrs":[]}'
+          public_api_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/32"],"common_k3s_api_cidrs":[],"common_public_tcp_ports":[80,443,6443]}'
+          broad_cluster_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/32"],"common_k3s_api_cidrs":[],"k3s_cluster_cidr":"0.0.0.0/0"}'
+          broad_service_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/32"],"common_k3s_api_cidrs":[],"k3s_service_cidr":"::/0"}'
+
+          ansible-playbook -i inventories/idc/hosts.example.yml \
+            playbooks/bootstrap.yml --check --tags preflight \
+            --extra-vars "$valid_vars"
+
+          for invalid_vars in "$broad_vars" "$broad_alias_vars" "$noncanonical_vars" "$public_api_vars" "$broad_cluster_vars" "$broad_service_vars"; do
+            if ansible-playbook -i inventories/idc/hosts.example.yml \
+              playbooks/bootstrap.yml --check --tags preflight \
+              --extra-vars "$invalid_vars"; then
+              echo "preflight accepted unsafe firewall variables" >&2
+              exit 1
+            fi
+          done
 
       - name: Lint Ansible
         working-directory: ansible
@@ -98,3 +586,35 @@ jobs:
           while IFS= read -r -d '' script; do
             bash -n "$script"
           done < <(find infra scripts -type f -name '*.sh' -print0)
+
+      - name: Check runbook shell and local Markdown links
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          root = Path(".")
+          missing = []
+          for document in root.rglob("*.md"):
+              if ".git" in document.parts:
+                  continue
+              text = document.read_text(encoding="utf-8")
+              for target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", text):
+                  target = target.strip()
+                  if not target or target.startswith(("#", "http://", "https://", "mailto:")):
+                      continue
+                  path = target.split("#", 1)[0]
+                  if path and not (document.parent / path).resolve().exists():
+                      missing.append(f"{document}: {target}")
+          assert not missing, "\n".join(missing)
+
+          runbook = Path("runbooks/disaster-recovery.md").read_text(encoding="utf-8")
+          bash_blocks = re.findall(r"```bash\n(.*?)\n```", runbook, flags=re.DOTALL)
+          assert bash_blocks
+          for block in bash_blocks:
+              subprocess.run(["bash", "-n"], input=block, text=True, check=True)
+          PY
