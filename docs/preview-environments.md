@@ -17,12 +17,12 @@ PR 하나마다 그 브랜치만의 서버가 뜬다. PR을 닫으면 사라진�
 ```
 1. PR 을 연다
 2. `preview` 라벨을 붙인다          ← 이게 자리 예약이다
-3. 3~5분 뒤 아래 주소가 뜬다
+3. DNS/TLS 설정 후라면 3~5분 뒤 아래 주소가 뜬다
 4. 다 봤으면 라벨을 떼거나 PR 을 닫는다
 ```
 
 현재 `apps/preview/applicationset.yaml`의 host는 의도적으로 해석되지 않는
-`pr-<PR번호>.api.example.invalid`다. IDC DNS/TLS를 정한 뒤 실제 1단 preview host
+`pr-<PR번호>-api.example.invalid`다. IDC DNS/TLS를 정한 뒤 실제 1단 preview host
 패턴으로 교체해야 URL이 열린다. 예를 들어 Cloudflare Universal SSL을 쓴다면
 `https://pr-27-api.tapple.co.kr`처럼 평평한 이름을 사용한다.
 
@@ -50,12 +50,14 @@ namespace 격리를 먼저 설계해야 한다.
 **6개.** 무제한이 아니다.
 
 ```
-노드 여유    9.8Gi
+상주 워크로드 뒤 노드 여유  약 8.4Gi
 PR 당        1Gi
-공유 DB      1Gi (1회)
 ```
 
-7번째 PR에 라벨을 붙이면 파드가 `Pending`에서 멈춘다 — 메모리가 없어 스케줄이 안 된다. 안 쓰는 PR의 라벨을 떼면 자리가 난다.
+`preview-budget` ResourceQuota가 Deployment 6개, requests 7680Mi/1800m,
+memory limits 14Gi를 강제한다. 공유 DB와 동시에 실행되는 createdb·cleanup Job의
+여유까지 포함한 값이다. 7번째 PR에 라벨을 붙이면 Argo CD sync가 quota에서 거부된다.
+안 쓰는 PR의 라벨을 떼면 자리가 난다.
 
 **`preview` 라벨이 곧 자리 예약이다.** 다 봤으면 떼는 게 예의다.
 
@@ -136,7 +138,9 @@ Secrets Manager version을 갱신하면 ESO가 최대 1시간 안에 다시 읽�
 `ExternalSecret`에 `external-secrets.io/force-sync` 애노테이션을 갱신한다. 앱은
 `envFrom`으로 값을 받으므로 Secret 동기화 후 프리뷰 Deployment를 재시작해야 한다.
 
-`PREVIEW_GITHUB_TOKEN`은 fine-grained PAT이고 `tapple-be`에 `Contents: Read` + `Pull requests: Read`만 있으면 된다. **만료되면 프리뷰가 조용히 안 뜬다** — ApplicationSet 상태에 `error fetching Secret token`이 찍힌다.
+`/tapple/platform/argocd/preview-github-token`의 `token`은 fine-grained PAT이고 `tapple-be`에
+`Contents: Read` + `Pull requests: Read`만 있으면 된다. **만료되면 프리뷰가 조용히 안 뜬다** —
+ApplicationSet 상태에 `error fetching Secret token`이 찍힌다.
 
 ### 정리
 

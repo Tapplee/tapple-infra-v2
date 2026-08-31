@@ -1,6 +1,6 @@
 # PR 프리뷰용 PostgreSQL — 공유 1대
 #
-# PR 마다 postgres 를 띄우지 않는다. PR 당 2Gi 면 노드 여유(9.8Gi)가 3~4개에서 바닥난다.
+# PR 마다 postgres 를 띄우지 않는다. PR마다 DB까지 띄우면 단일 노드의 프리뷰 예산이 빠르게 바닥난다.
 # 대신 이 한 대를 공유하고 PR 마다 database 를 따로 만든다(createdb Job).
 # database 를 나누지 않으면 여러 PR 의 Flyway 가 같은 스키마를 동시에 고쳐 서로를 깬다.
 #

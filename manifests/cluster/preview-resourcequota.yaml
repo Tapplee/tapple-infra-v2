@@ -1,0 +1,13 @@
+# 내부 PR 프리뷰의 단일 노드 예산. 공유 postgres-preview 외에 앱 Deployment는 최대 6개다.
+# 6개 앱이 동시에 createdb Job을 실행하고 cleanup Job이 겹쳐도 들어오도록 transient 여유를 둔다.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: preview-budget
+  namespace: preview
+spec:
+  hard:
+    count/deployments.apps: "6"
+    requests.cpu: 1800m
+    requests.memory: 7680Mi
+    limits.memory: 14Gi

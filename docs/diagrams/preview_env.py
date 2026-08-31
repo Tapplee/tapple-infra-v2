@@ -7,6 +7,7 @@ AWS 인증과 ESO 내부 동작은 secret_supply_chain.py로 분리한다. 이 �
 """
 
 from diagrams import Cluster, Diagram, Edge
+from diagrams.k8s.clusterconfig import Quota
 from diagrams.k8s.compute import Deployment, Job, StatefulSet
 from diagrams.k8s.network import Ingress
 from diagrams.k8s.podconfig import Secret
@@ -56,9 +57,13 @@ def build(theme: dict) -> None:
             )
 
         with Cluster("k3s · namespace preview", graph_attr=ca):
+            quota = Quota(
+                "preview-budget\nDeployment 최대 6\nnamespace 자원 상한",
+                fontcolor=fg,
+            )
             with Cluster("PR마다 생성 · PR 종료 시 삭제", graph_attr=ca):
                 application = Argocd("Application\npr-42", fontcolor=fg)
-                ingress = Ingress("pr-42.api.<host>", fontcolor=fg)
+                ingress = Ingress("pr-42-api.<host>", fontcolor=fg)
                 app = Deployment(
                     "tapple-server-pr-42\n1Gi · preview-lowest",
                     fontcolor=fg,
@@ -94,6 +99,12 @@ def build(theme: dict) -> None:
         application >> Edge(color=AUTO) >> ingress
         application >> Edge(color=AUTO) >> app
         application >> Edge(color=AUTO) >> create_db
+        quota >> Edge(
+            label="admission 제한",
+            color=RISK,
+            fontcolor=RISK,
+            style="dashed",
+        ) >> app
         app >> Edge(label="image pull", color=AUTO, fontcolor=AUTO, style="dotted") >> image
 
         shared_secrets >> Edge(

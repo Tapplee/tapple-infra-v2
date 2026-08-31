@@ -4,7 +4,7 @@
 #   fullnameOverride · ingress.host · createDatabase.name · image.tag
 #   env.POSTGRES_URL · env.SPRING_APPLICATION_NAME · env.DEPLOY_ENV
 #
-# 자원은 dev 의 절반이다. PR 6개가 동시에 떠도 노드 여유(9.8Gi) 안에 들어와야 한다.
+# 자원은 dev 의 절반이다. PR 6개와 transient Job은 preview-budget ResourceQuota 안에 들어간다.
 
 environment: preview
 
