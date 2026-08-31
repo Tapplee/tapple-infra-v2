@@ -13,7 +13,7 @@ jobs:
   validate:
     name: Static validation
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -45,11 +45,39 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP" kubeconform
           echo "KUBECONFORM_BIN=$RUNNER_TEMP/kubeconform" >> "$GITHUB_ENV"
 
+      - name: Install pinned actionlint and promtool
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          actionlint_archive="$RUNNER_TEMP/actionlint-v1.7.12.tar.gz"
+          curl -fsSL --retry 3 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            -o "$actionlint_archive"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $actionlint_archive" \
+            | sha256sum -c -
+          tar -xzf "$actionlint_archive" -C "$RUNNER_TEMP" actionlint
+          echo "ACTIONLINT_BIN=$RUNNER_TEMP/actionlint" >> "$GITHUB_ENV"
+
+          promtool_archive="$RUNNER_TEMP/prometheus-3.11.3.linux-amd64.tar.gz"
+          curl -fsSL --retry 3 \
+            https://github.com/prometheus/prometheus/releases/download/v3.11.3/prometheus-3.11.3.linux-amd64.tar.gz \
+            -o "$promtool_archive"
+          echo "9479af67673316278958cda1f39b88a09f8921084e039c65acca060d0447bb38  $promtool_archive" \
+            | sha256sum -c -
+          tar -xzf "$promtool_archive" -C "$RUNNER_TEMP" \
+            prometheus-3.11.3.linux-amd64/promtool
+          echo "PROMTOOL_BIN=$RUNNER_TEMP/prometheus-3.11.3.linux-amd64/promtool" \
+            >> "$GITHUB_ENV"
+
       - name: Install Python validation tools
         run: >-
           python -m pip install --disable-pip-version-check
           -r ansible/requirements.txt
           cfn-lint==1.55.1
+
+      - name: Lint GitHub Actions workflows
+        run: "$ACTIONLINT_BIN"
 
       - name: Lint and render tapple-server environments
         shell: bash
@@ -58,13 +86,14 @@ jobs:
 
           helm lint charts/tapple-server --strict
           helm template tapple-prod charts/tapple-server \
-            --namespace app >/dev/null
+            --namespace app >"$RUNNER_TEMP/tapple-prod-rendered.yaml"
 
           helm lint charts/tapple-server --strict \
             --values charts/tapple-server/values-dev.yaml
           helm template tapple-dev charts/tapple-server \
             --namespace dev-app \
-            --values charts/tapple-server/values-dev.yaml >/dev/null
+            --values charts/tapple-server/values-dev.yaml \
+            >"$RUNNER_TEMP/tapple-dev-rendered.yaml"
 
           preview_args=(
             --values charts/tapple-server/values-preview.yaml
@@ -77,6 +106,60 @@ jobs:
           helm template tapple-preview charts/tapple-server \
             --namespace preview \
             "${preview_args[@]}" >"$RUNNER_TEMP/tapple-preview-rendered.yaml"
+
+          valid_ingress_args=(
+            --set ingress.enabled=true
+            --set-string ingress.host=api.example.com
+            --set-string ingress.tls[0].secretName=cloudflare-origin-cert
+            --set-string ingress.tls[0].hosts[0]=api.example.com
+          )
+          helm template tapple-ingress charts/tapple-server \
+            --namespace app "${valid_ingress_args[@]}" \
+            >"$RUNNER_TEMP/tapple-ingress-rendered.yaml"
+
+          invalid_ingress_cases=(
+            '--set ingress.enabled=true'
+            '--set ingress.enabled=true --set-string ingress.host=api.example.com'
+            '--set ingress.enabled=true --set-string ingress.host=api.example.com --set-string ingress.className=nginx --set-string ingress.tls[0].secretName=tls --set-string ingress.tls[0].hosts[0]=api.example.com'
+            '--set ingress.enabled=true --set-string ingress.host=api.example.com --set-string ingress.tls[0].secretName=tls --set-string ingress.tls[0].hosts[0]=other.example.com'
+          )
+          for invalid_args in "${invalid_ingress_cases[@]}"; do
+            read -r -a args <<<"$invalid_args"
+            if helm template invalid-ingress charts/tapple-server "${args[@]}" >/dev/null 2>&1; then
+              echo "unsafe ingress values rendered successfully: $invalid_args" >&2
+              exit 1
+            fi
+          done
+
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import yaml
+
+          runner_temp = Path(os.environ["RUNNER_TEMP"])
+          for environment in ("prod", "dev", "preview"):
+              resources = [
+                  doc for doc in yaml.safe_load_all(
+                      (runner_temp / f"tapple-{environment}-rendered.yaml").read_text()
+                  ) if doc
+              ]
+              assert not any(doc["kind"] == "Ingress" for doc in resources), environment
+
+          ingress_resources = [
+              doc for doc in yaml.safe_load_all(
+                  (runner_temp / "tapple-ingress-rendered.yaml").read_text()
+              ) if doc
+          ]
+          ingress = next(doc for doc in ingress_resources if doc["kind"] == "Ingress")
+          assert ingress["spec"]["ingressClassName"] == "traefik"
+          assert ingress["metadata"]["annotations"] == {
+              "traefik.ingress.kubernetes.io/router.entrypoints": "websecure"
+          }
+          assert ingress["spec"]["tls"] == [{
+              "hosts": ["api.example.com"],
+              "secretName": "cloudflare-origin-cert",
+          }]
+          PY
 
       - name: Lint and render tapple-secrets
         shell: bash
@@ -141,6 +224,56 @@ jobs:
           }
           assert mappings == {"tls.crt": "certificate", "tls.key": "private-key"}
           PY
+
+      - name: Validate Prometheus alert rules
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rules_file="$RUNNER_TEMP/default-alerts.yml"
+          export PROMETHEUS_RULES_FILE="$rules_file"
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import yaml
+
+          with Path("manifests/monitoring/prometheus-alert-rules.yaml").open(
+              encoding="utf-8"
+          ) as stream:
+              configmap = yaml.safe_load(stream)
+          assert configmap["kind"] == "ConfigMap"
+          assert configmap["metadata"]["name"] == "prometheus-alert-rules"
+
+          rules_text = configmap["data"]["default-alerts.yml"]
+          rules = yaml.safe_load(rules_text)
+          alerts = [
+              rule["alert"]
+              for group in rules["groups"]
+              for rule in group["rules"]
+              if "alert" in rule
+          ]
+          alert_names = set(alerts)
+          expected = {"NodeExporterDown", "TempoDown"}
+          dropped = {
+              "ApiServerDown",
+              "PrometheusTargetDown",
+              "PostgreSQLDown",
+              "RedisDown",
+              "RedisMemoryHighUsage",
+              "RedisRejectedConnections",
+              "SSLCertificateExpiresSoon",
+              "ExternalHttpHealthCheckFailed",
+              "ApiHealthCheckFailed",
+          }
+          assert expected <= alert_names, expected - alert_names
+          assert all(alerts.count(name) == 1 for name in expected)
+          assert dropped.isdisjoint(alert_names), dropped & alert_names
+          Path(os.environ["PROMETHEUS_RULES_FILE"]).write_text(
+              rules_text,
+              encoding="utf-8",
+          )
+          PY
+          "$PROMTOOL_BIN" check rules "$rules_file"
 
       - name: Render and verify Grafana contract
         shell: bash
@@ -264,8 +397,10 @@ jobs:
 
           python - <<'PY'
           from decimal import Decimal
+          import ipaddress
           import os
           from pathlib import Path
+          import re
           import yaml
 
           def cpu_millicores(value):
@@ -303,6 +438,9 @@ jobs:
               backup = yaml.safe_load(stream)
 
           assert backup["kind"] == "CronJob"
+          assert backup["spec"]["schedule"] == "0 3 * * *"
+          assert backup["spec"]["timeZone"] == "Asia/Seoul"
+          assert backup["spec"]["startingDeadlineSeconds"] == 3600
           assert backup["spec"]["suspend"] is True
           assert backup["spec"]["jobTemplate"]["metadata"]["labels"] == {
               "app.kubernetes.io/name": "pg-backup"
@@ -324,6 +462,115 @@ jobs:
                   if mount["name"] == "backup"
               )
               assert backup_mount["mountPath"] == "/backup"
+          volumes = {item["name"]: item for item in pod["volumes"]}
+          assert volumes["backup"]["emptyDir"]["sizeLimit"] == "5Gi"
+          assert volumes["tmp"]["emptyDir"]["sizeLimit"] == "64Mi"
+
+          postgres_image = (
+              "postgres:16.15-bookworm@sha256:"
+              "bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825"
+          )
+          postgres_references = []
+          for root in (Path("manifests"), Path("charts")):
+              for manifest in root.rglob("*.yaml"):
+                  postgres_references.extend(
+                      re.findall(
+                          r"^\s*image:\s*(postgres:[^\s#]+)",
+                          manifest.read_text(encoding="utf-8"),
+                          flags=re.MULTILINE,
+                      )
+                  )
+          assert len(postgres_references) == 7, postgres_references
+          assert set(postgres_references) == {postgres_image}, postgres_references
+
+          for statefulset_path in (
+              "manifests/postgres/statefulset.yaml",
+              "manifests/postgres-dev/statefulset.yaml",
+              "manifests/postgres-preview/statefulset.yaml",
+          ):
+              with Path(statefulset_path).open(encoding="utf-8") as stream:
+                  statefulset = yaml.safe_load(stream)
+              statefulset_volumes = {
+                  item["name"]: item
+                  for item in statefulset["spec"]["template"]["spec"]["volumes"]
+              }
+              assert statefulset_volumes["tmp"]["emptyDir"]["sizeLimit"] == "256Mi"
+              assert statefulset_volumes["run"]["emptyDir"]["sizeLimit"] == "64Mi"
+
+          namespace_documents = []
+          for namespace_path in (
+              "manifests/cluster/namespaces.yaml",
+              "manifests/cluster/team-access.yaml",
+          ):
+              with Path(namespace_path).open(encoding="utf-8") as stream:
+                  namespace_documents.extend(
+                      doc for doc in yaml.safe_load_all(stream)
+                      if doc and doc.get("kind") == "Namespace"
+                  )
+          assert {doc["metadata"]["name"] for doc in namespace_documents} == {
+              "app", "db", "dev-app", "dev-db", "preview", "monitoring",
+              "external-secrets", "team-access",
+          }
+          for namespace in namespace_documents:
+              labels = namespace["metadata"]["labels"]
+              assert labels["pod-security.kubernetes.io/audit"] == "restricted"
+              assert labels["pod-security.kubernetes.io/audit-version"] == "v1.36"
+              assert labels["pod-security.kubernetes.io/warn"] == "restricted"
+              assert labels["pod-security.kubernetes.io/warn-version"] == "v1.36"
+              assert not any(
+                  key.startswith("pod-security.kubernetes.io/enforce")
+                  for key in labels
+              )
+
+          with Path("ansible/roles/common/defaults/main.yml").open(
+              encoding="utf-8"
+          ) as stream:
+              common_defaults = yaml.safe_load(stream)
+          with Path("ansible/roles/common/vars/main.yml").open(
+              encoding="utf-8"
+          ) as stream:
+              common_vars = yaml.safe_load(stream)
+          assert common_defaults["common_public_tcp_ports"] == [443]
+          cloudflare_cidrs = (
+              common_vars["common_cloudflare_origin_ipv4_cidrs"]
+              + common_vars["common_cloudflare_origin_ipv6_cidrs"]
+          )
+          assert len(cloudflare_cidrs) == 22
+          assert len(set(cloudflare_cidrs)) == len(cloudflare_cidrs)
+          for raw_cidr in cloudflare_cidrs:
+              network = ipaddress.ip_network(raw_cidr, strict=True)
+              assert network.is_global and network.prefixlen > 0
+              assert raw_cidr == network.with_prefixlen
+
+          with Path("ansible/roles/k3s/defaults/main.yml").open(
+              encoding="utf-8"
+          ) as stream:
+              k3s_defaults = yaml.safe_load(stream)
+          assert k3s_defaults["k3s_eviction_memory_available"] == "1Gi"
+          assert k3s_defaults["k3s_eviction_nodefs_available"] == "10%"
+          assert k3s_defaults["k3s_eviction_imagefs_available"] == "15%"
+          assert k3s_defaults["k3s_eviction_nodefs_inodes_free"] == "5%"
+          assert k3s_defaults["k3s_eviction_imagefs_inodes_free"] == "5%"
+          eviction_template = Path(
+              "ansible/roles/k3s/templates/config.yaml.j2"
+          ).read_text(encoding="utf-8")
+          for signal in (
+              "memory.available", "nodefs.available", "imagefs.available",
+              "nodefs.inodesFree", "imagefs.inodesFree",
+          ):
+              assert eviction_template.count(signal) == 1, signal
+
+          argocd_tasks = Path(
+              "ansible/roles/argocd/tasks/main.yml"
+          ).read_text(encoding="utf-8")
+          for label in (
+              "pod-security.kubernetes.io/audit",
+              "pod-security.kubernetes.io/audit-version",
+              "pod-security.kubernetes.io/warn",
+              "pod-security.kubernetes.io/warn-version",
+          ):
+              assert label in argocd_tasks
+          assert "pod-security.kubernetes.io/enforce" not in argocd_tasks
 
           with Path("manifests/cluster/preview-resourcequota.yaml").open(
               encoding="utf-8"
@@ -448,6 +695,7 @@ jobs:
               "apps/platform/monitoring/grafana.yaml": "https://grafana-community.github.io/helm-charts",
           }
           rendered = []
+          rendered_resources = {}
           for application_path, expected_repository in applications.items():
               application = yaml.safe_load(
                   (root / application_path).read_text(encoding="utf-8")
@@ -491,6 +739,328 @@ jobs:
                       stdout=stream,
                   )
               rendered.append(str(manifest))
+              rendered_resources[name] = [
+                  document
+                  for document in yaml.safe_load_all(
+                      manifest.read_text(encoding="utf-8")
+                  )
+                  if document
+              ]
+
+          def resource(application, kind, name):
+              return next(
+                  document
+                  for document in rendered_resources[application]
+                  if document["kind"] == kind
+                  and document["metadata"]["name"] == name
+              )
+
+          def container(workload, name, section="containers"):
+              return next(
+                  item
+                  for item in workload["spec"]["template"]["spec"].get(
+                      section, []
+                  )
+                  if item["name"] == name
+              )
+
+          # Upstream chart upgrades must not silently add an unbounded sidecar or
+          # init container. CPU limits are intentionally optional for monitoring
+          # workloads, but every container reserves CPU/memory and has a hard
+          # memory ceiling on this single node.
+          for application, documents in rendered_resources.items():
+              for workload in documents:
+                  if workload["kind"] not in {
+                      "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"
+                  }:
+                      continue
+                  if workload["kind"] == "CronJob":
+                      pod_spec = workload["spec"]["jobTemplate"]["spec"][
+                          "template"
+                      ]["spec"]
+                  else:
+                      pod_spec = workload["spec"]["template"]["spec"]
+                  for section in ("initContainers", "containers"):
+                      for item in pod_spec.get(section, []):
+                          resources = item.get("resources", {})
+                          requests = resources.get("requests", {})
+                          limits = resources.get("limits", {})
+                          assert {"cpu", "memory"} <= set(requests), (
+                              application, workload["kind"],
+                              workload["metadata"]["name"], section,
+                              item["name"], "requests",
+                          )
+                          assert "memory" in limits, (
+                              application, workload["kind"],
+                              workload["metadata"]["name"], section,
+                              item["name"], "memory limit",
+                          )
+
+          otel_service = resource(
+              "otel-collector", "Service", "otel-collector"
+          )
+          assert {
+              (
+                  port["name"],
+                  port["port"],
+                  port["targetPort"],
+                  port["protocol"],
+              )
+              for port in otel_service["spec"]["ports"]
+          } == {
+              ("otlp", 4317, 4317, "TCP"),
+              ("otlp-http", 4318, 4318, "TCP"),
+              ("metrics", 8888, 8888, "TCP"),
+          }
+          otel_configmap = resource(
+              "otel-collector", "ConfigMap", "otel-collector"
+          )
+          otel_config = yaml.safe_load(otel_configmap["data"]["relay"])
+          assert otel_config["processors"]["memory_limiter"] == {
+              "check_interval": "5s",
+              "limit_percentage": 80,
+              "spike_limit_percentage": 25,
+          }
+          assert {
+              pipeline: config["processors"]
+              for pipeline, config in otel_config["service"]["pipelines"].items()
+          } == {
+              "logs": ["memory_limiter", "batch"],
+              "metrics": ["memory_limiter", "batch"],
+              "traces": ["memory_limiter", "probabilistic_sampler", "batch"],
+          }
+          otel_deployment = resource(
+              "otel-collector", "Deployment", "otel-collector"
+          )
+          otel_container = container(
+              otel_deployment, "opentelemetry-collector"
+          )
+          otel_env = {
+              item["name"]: item.get("value")
+              for item in otel_container["env"]
+          }
+          assert otel_env["GOMEMLIMIT"] == "409MiB"
+          assert otel_container["resources"] == {
+              "limits": {"memory": "512Mi"},
+              "requests": {"cpu": "100m", "memory": "256Mi"},
+          }
+
+          tempo_statefulset = resource("tempo", "StatefulSet", "tempo")
+          tempo_container = container(tempo_statefulset, "tempo")
+          assert "-mem-ballast-size-mbs=256" in tempo_container["args"]
+          assert tempo_container["resources"] == {
+              "limits": {"memory": "768Mi"},
+              "requests": {"cpu": "100m", "memory": "512Mi"},
+          }
+
+          grafana_deployment = resource("grafana", "Deployment", "grafana")
+          assert container(
+              grafana_deployment, "init-chown-data", "initContainers"
+          )["resources"] == {
+              "limits": {"memory": "32Mi"},
+              "requests": {"cpu": "10m", "memory": "16Mi"},
+          }
+          loki_statefulset = resource("loki", "StatefulSet", "loki")
+          assert container(loki_statefulset, "loki-sc-rules")["resources"] == {
+              "limits": {"memory": "128Mi"},
+              "requests": {"cpu": "25m", "memory": "64Mi"},
+          }
+          prometheus_deployment = resource(
+              "prometheus", "Deployment", "prometheus-server"
+          )
+          assert container(
+              prometheus_deployment,
+              "prometheus-server-configmap-reload",
+          )["resources"] == {
+              "limits": {"memory": "64Mi"},
+              "requests": {"cpu": "10m", "memory": "32Mi"},
+          }
+
+          with Path("manifests/monitoring/networkpolicy.yaml").open(
+              encoding="utf-8"
+          ) as stream:
+              monitoring_policies = {
+                  document["metadata"]["name"]: document
+                  for document in yaml.safe_load_all(stream)
+                  if document
+              }
+          assert all(
+              policy["kind"] == "NetworkPolicy"
+              and policy["metadata"]["namespace"] == "monitoring"
+              for policy in monitoring_policies.values()
+          )
+          assert set(monitoring_policies) == {
+              "monitoring-default-deny-ingress",
+              "monitoring-allow-same-namespace",
+              "otel-collector-allow-app-otlp",
+              "grafana-allow-traefik",
+          }
+          default_deny = monitoring_policies[
+              "monitoring-default-deny-ingress"
+          ]["spec"]
+          assert default_deny == {
+              "podSelector": {},
+              "policyTypes": ["Ingress"],
+          }
+          same_namespace = monitoring_policies[
+              "monitoring-allow-same-namespace"
+          ]["spec"]
+          assert same_namespace == {
+              "podSelector": {},
+              "policyTypes": ["Ingress"],
+              "ingress": [{"from": [{"podSelector": {}}]}],
+          }
+          otel_policy = monitoring_policies[
+              "otel-collector-allow-app-otlp"
+          ]["spec"]
+          otel_selector = {
+              "app.kubernetes.io/name": "opentelemetry-collector",
+              "app.kubernetes.io/instance": "otel-collector",
+              "component": "standalone-collector",
+          }
+          assert otel_policy["podSelector"]["matchLabels"] == otel_selector
+          assert set(otel_policy) == {
+              "podSelector", "policyTypes", "ingress"
+          }
+          assert otel_policy["policyTypes"] == ["Ingress"]
+          assert all(
+              otel_deployment["spec"]["template"]["metadata"]["labels"].get(key)
+              == value
+              for key, value in otel_selector.items()
+          )
+          otel_ingress = otel_policy["ingress"]
+          assert len(otel_ingress) == 1
+          assert otel_ingress[0]["from"] == [{
+              "namespaceSelector": {
+                  "matchExpressions": [{
+                      "key": "kubernetes.io/metadata.name",
+                      "operator": "In",
+                      "values": ["app", "dev-app", "preview"],
+                  }]
+              }
+          }]
+          assert otel_ingress[0]["ports"] == [
+              {"protocol": "TCP", "port": 4317},
+              {"protocol": "TCP", "port": 4318},
+          ]
+          grafana_policy = monitoring_policies[
+              "grafana-allow-traefik"
+          ]["spec"]
+          grafana_selector = {
+              "app.kubernetes.io/name": "grafana",
+              "app.kubernetes.io/instance": "grafana",
+          }
+          assert grafana_policy["podSelector"]["matchLabels"] == grafana_selector
+          assert set(grafana_policy) == {
+              "podSelector", "policyTypes", "ingress"
+          }
+          assert grafana_policy["policyTypes"] == ["Ingress"]
+          assert all(
+              grafana_deployment["spec"]["template"]["metadata"]["labels"].get(key)
+              == value
+              for key, value in grafana_selector.items()
+          )
+          assert grafana_policy["ingress"] == [{
+              "from": [{
+                  "namespaceSelector": {
+                      "matchLabels": {
+                          "kubernetes.io/metadata.name": "kube-system"
+                      }
+                  },
+                  "podSelector": {
+                      "matchLabels": {
+                          "app.kubernetes.io/name": "traefik",
+                          "app.kubernetes.io/instance": "traefik-kube-system",
+                      }
+                  },
+              }],
+              "ports": [{"protocol": "TCP", "port": 3000}],
+          }]
+
+          with Path(os.environ["ARGOCD_MANIFEST"]).open(
+              encoding="utf-8"
+          ) as stream:
+              argocd_manifest = [
+                  document
+                  for document in yaml.safe_load_all(stream)
+                  if document
+              ]
+          with Path("ansible/roles/argocd/defaults/main.yml").open(
+              encoding="utf-8"
+          ) as stream:
+              argocd_defaults = yaml.safe_load(stream)
+
+          raw_containers = []
+          raw_workloads = set()
+          for workload in argocd_manifest:
+              if workload["kind"] not in {
+                  "Deployment", "StatefulSet", "DaemonSet"
+              }:
+                  continue
+              raw_workloads.add((workload["kind"], workload["metadata"]["name"]))
+              pod_spec = workload["spec"]["template"]["spec"]
+              for section in ("initContainers", "containers"):
+                  raw_containers.extend(
+                      (
+                          workload["kind"],
+                          workload["metadata"]["name"],
+                          section,
+                          item["name"],
+                      )
+                      for item in pod_spec.get(section, [])
+                  )
+
+          patched_containers = []
+          resource_patches = argocd_defaults["argocd_resource_patches"]
+          patched_workloads = {
+              (patch["kind"], patch["name"])
+              for patch in resource_patches
+          }
+          assert len(resource_patches) == len(patched_workloads)
+          assert patched_workloads == raw_workloads, {
+              "missing_workloads": sorted(raw_workloads - patched_workloads),
+              "stale_workloads": sorted(patched_workloads - raw_workloads),
+          }
+          for patch in resource_patches:
+              pod_spec = patch["patch"]["spec"]["template"]["spec"]
+              for section in ("initContainers", "containers"):
+                  for item in pod_spec.get(section, []):
+                      patched_containers.append((
+                          patch["kind"],
+                          patch["name"],
+                          section,
+                          item["name"],
+                      ))
+                      resources = item["resources"]
+                      for boundary in ("requests", "limits"):
+                          assert {"cpu", "memory"} <= set(
+                              resources[boundary]
+                          ), (patch["name"], item["name"], boundary)
+                          assert all(
+                              str(resources[boundary][resource_name])
+                              for resource_name in ("cpu", "memory")
+                          )
+          assert len(raw_containers) == len(set(raw_containers))
+          assert len(patched_containers) == len(set(patched_containers))
+          assert set(patched_containers) == set(raw_containers), {
+              "missing_patches": sorted(
+                  set(raw_containers) - set(patched_containers)
+              ),
+              "stale_patches": sorted(
+                  set(patched_containers) - set(raw_containers)
+              ),
+          }
+
+          custom_rendered = [
+              Path(os.environ["RUNNER_TEMP"], filename)
+              for filename in (
+                  "tapple-prod-rendered.yaml",
+                  "tapple-dev-rendered.yaml",
+                  "tapple-preview-rendered.yaml",
+              )
+          ]
+          assert all(path.is_file() for path in custom_rendered)
+          rendered.extend(str(path) for path in custom_rendered)
 
           command = [
               os.environ["KUBECONFORM_BIN"],
@@ -557,6 +1127,7 @@ jobs:
           broad_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/32"],"common_k3s_api_cidrs":["0.0.0.0/0"]}'
           broad_alias_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/32"],"common_k3s_api_cidrs":["1.2.3.4/00"]}'
           noncanonical_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/24"],"common_k3s_api_cidrs":[]}'
+          public_http_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/32"],"common_k3s_api_cidrs":[],"common_public_tcp_ports":[80,443]}'
           public_api_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/32"],"common_k3s_api_cidrs":[],"common_public_tcp_ports":[80,443,6443]}'
           broad_cluster_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/32"],"common_k3s_api_cidrs":[],"k3s_cluster_cidr":"0.0.0.0/0"}'
           broad_service_vars='{"ansible_host":"192.0.2.10","ansible_user":"ubuntu","bootstrap_confirm":true,"common_admin_ssh_cidrs":["198.51.100.10/32"],"common_k3s_api_cidrs":[],"k3s_service_cidr":"::/0"}'
@@ -565,7 +1136,7 @@ jobs:
             playbooks/bootstrap.yml --check --tags preflight \
             --extra-vars "$valid_vars"
 
-          for invalid_vars in "$broad_vars" "$broad_alias_vars" "$noncanonical_vars" "$public_api_vars" "$broad_cluster_vars" "$broad_service_vars"; do
+          for invalid_vars in "$broad_vars" "$broad_alias_vars" "$noncanonical_vars" "$public_http_vars" "$public_api_vars" "$broad_cluster_vars" "$broad_service_vars"; do
             if ansible-playbook -i inventories/idc/hosts.example.yml \
               playbooks/bootstrap.yml --check --tags preflight \
               --extra-vars "$invalid_vars"; then
