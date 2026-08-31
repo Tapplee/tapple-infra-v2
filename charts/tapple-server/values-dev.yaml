@@ -35,6 +35,9 @@ env:
   POSTGRES_URL: jdbc:postgresql://postgres.dev-db.svc.cluster.local:5432/tapple_dev
   # 관측 스택은 prod와 공유 — deployment_environment=dev 라벨로 구분해서 본다
   OTEL_URL: http://otel-collector.monitoring.svc.cluster.local:4318
+  # prod 기본값을 상속해 개발 데이터가 자동 파기되지 않도록 명시적으로 끈다.
+  MEDIA_STORAGE_PURGE_ENABLED: "false"
+  PRIVACY_RETENTION_ENABLED: "false"
 
 # 기동 여유는 prod보다 넉넉히 (CPU가 적어 느림)
 probes:

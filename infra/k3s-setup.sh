@@ -16,7 +16,9 @@ curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - \
   --write-kubeconfig-mode=600 \
   --secrets-encryption \
   --kubelet-arg=system-reserved=cpu=1000m,memory=2Gi \
-  --kubelet-arg='eviction-hard=memory.available<1Gi'
+  --kubelet-arg='eviction-hard=memory.available<1Gi' \
+  --kubelet-arg=container-log-max-size=10Mi \
+  --kubelet-arg=container-log-max-files=5
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 

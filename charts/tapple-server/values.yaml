@@ -72,6 +72,9 @@ env:
   POSTGRES_URL: jdbc:postgresql://postgres.db.svc.cluster.local:5432/tapple
   # OTLP 게이트웨이 — 메트릭·트레이스·로그 전부 여기로 push (scrape 아님)
   OTEL_URL: http://otel-collector.monitoring.svc.cluster.local:4318
+  # 운영에서만 개인정보·미디어 보유기간 만료 대상을 정기 파기한다.
+  MEDIA_STORAGE_PURGE_ENABLED: "true"
+  PRIVACY_RETENTION_ENABLED: "true"
 
 # POSTGRES_USERNAME / POSTGRES_PASSWORD / JWT_SECRET_KEY / OTEL_AUTH_HEADER 등
 # (환경별 Secrets Manager JSON Secret → ESO)

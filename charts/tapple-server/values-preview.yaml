@@ -36,6 +36,9 @@ env:
   # @Profile("!prod") 가 프리뷰에서 QA 엔드포인트를 열어준다(의도)
   SPRING_PROFILES_ACTIVE: dev,otel,k3s
   OTEL_URL: http://otel-collector.monitoring.svc.cluster.local:4318
+  # prod 기본값을 상속해 임시 프리뷰 데이터가 자동 파기되지 않도록 명시적으로 끈다.
+  MEDIA_STORAGE_PURGE_ENABLED: "false"
+  PRIVACY_RETENTION_ENABLED: "false"
 
 # 프리뷰 전용 시크릿. /tapple/preview 경로에서 ESO가 동기화한다.
 # prod 자격증명을 프리뷰에 쓰지 않는다 — 프리뷰는 URL 을 아는 사람이면 누구나 접근한다.

@@ -72,6 +72,7 @@ K3s는 `system-reserved=cpu=1000m,memory=2Gi`와 함께 memory·disk·inode hard
 모두 명시한다. 하나만 재정의하면 나머지 kubelet 기본값이 0이 되는 동작을 피하기 위해
 `memory.available<1Gi`, `nodefs.available<10%`, `imagefs.available<15%`,
 `nodefs.inodesFree<5%`, `imagefs.inodesFree<5%`를 한 묶음으로 유지한다.
+컨테이너 로그는 kubelet에서 파일당 `10Mi`, 컨테이너당 최대 `5`개로 회전한다.
 
 Argo CD upstream 설치 manifest의 모든 workload container와 init container에는 설치 직후
 resource request/limit patch를 적용한다. 새 upstream 버전에서 container가 늘어났는데 patch가
