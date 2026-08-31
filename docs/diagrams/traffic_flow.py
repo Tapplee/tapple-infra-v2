@@ -15,7 +15,6 @@ KubeDiagrams 의 아키텍처 그림은 "무엇이 있는가"(인벤토리)를 �
 from diagrams import Cluster, Diagram, Edge
 from diagrams.aws.storage import S3
 from diagrams.k8s.compute import Cronjob, Deployment, StatefulSet
-from diagrams.k8s.controlplane import API
 from diagrams.k8s.network import Ingress, Service
 from diagrams.onprem.client import Users
 from diagrams.onprem.logging import Loki
@@ -27,7 +26,7 @@ from theme import THEMES, cluster_attr, edge_attr, graph_attr, node_attr
 
 DATA = "#4C8FD0"   # 사용자 요청 경로
 TELEM = "#A175D8"  # 관측 데이터 (push)
-OPS = "#E5534B"    # 운영자·팀원 접근
+OPS = "#E5534B"    # 운영 접근
 
 
 def dark_icon_panel(theme: dict, width: str = "1.25") -> dict:
@@ -64,11 +63,10 @@ def build(theme: dict) -> None:
         edge = Internet("Cloudflare edge\nproxied DNS · TLS", **dark_wide_panel)
         outside = Internet("외부 uptime monitor\nHTTPS + heartbeat", **dark_wide_panel)
         backup_store = S3("전용 AWS S3 backup\nSSE-S3 · versioning · 35d\nwriter: put only", **dark_wide_panel)
-        team = Users("팀원", **dark_panel)
+        team = Users("승인 Grafana 사용자", **dark_wide_panel)
 
         with Cluster("ns kube-system", graph_attr=ca):
             traefik = Traefik("traefik websecure\n443 only · public 80 닫힘\nUFW: Cloudflare CIDR만")
-            api = API("kube-apiserver\n:6443 CIDR allowlist")
 
         with Cluster("ns app  ·  prod", graph_attr=ca):
             ing = Ingress("기본 비활성 Ingress\n실제 host + TLS 후 enable")
@@ -124,14 +122,9 @@ def build(theme: dict) -> None:
         graf << Edge(color=TELEM, style="dotted") << loki
         graf << Edge(color=TELEM, style="dotted") << prom
 
-        # DB는 CIDR allowlist + 최소권한 RBAC로 API port-forward. Grafana는 승인 로컬 계정.
+        # 일반 사용자는 kubeconfig 없이 승인된 Grafana 계정만 사용한다.
         team >> Edge(color=OPS, fontcolor=OPS, style="dotted",
-                     label="제한 kubeconfig") >> api
-        api >> Edge(color=OPS, fontcolor=OPS, style="dotted",
-                    label="RBAC port-forward") >> pg
-        api >> Edge(color=OPS, style="dotted") >> pg_d
-        team >> Edge(color=OPS, fontcolor=OPS, style="dotted",
-                     label="HTTPS · 승인 계정") >> edge
+                     label="HTTPS · Viewer 계정\nkubeconfig 없음") >> edge
         traefik >> Edge(color=OPS, style="dotted") >> graf_ing >> Edge(color=OPS, style="dotted") >> graf
 
         outside >> Edge(color=OPS, fontcolor=OPS, style="dotted",

@@ -1,196 +1,144 @@
-# PR 프리뷰 환경
+# PR 프리뷰
 
-PR 하나마다 그 브랜치만의 앱 workload와 database가 뜬다. PR을 닫으면 workload가 사라진다.
-현재 외부 Ingress는 fail-closed 기본값으로 꺼져 있어, 아래 기본 사용법은 클러스터 내부 배포와
-승인 kubeconfig를 이용한 port-forward를 뜻한다.
+프리뷰는 내부의 신뢰된 same-repository PR만 대상으로 한다.
+fork와 외부 PR의 코드는 build, preview, deploy하지 않는다.
+동시 상한은 6개다.
+Ingress는 실제 DNS와 TLS를 정하기 전까지 기본 off다.
 
-**해결하는 문제**: dev 환경이 하나뿐이라 여러 사람이 각자 기능을 확인하려면 `dev`에 머지해야 하고, 나중에 머지한 사람 코드가 앞사람 걸 덮는다. 뭔가 깨졌을 때 누구 코드 때문인지 구분도 안 된다.
+## 사용 조건
 
-<picture>
-  <source media="(prefers-color-scheme: dark)"  srcset="diagrams/out/preview-env-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="diagrams/out/preview-env.png">
-  <img alt="PR에 preview 라벨을 붙이면 이미지 빌드·ApplicationSet 감지를 거쳐 임시 환경이 생기고, PR을 닫으면 사라지는 흐름" src="diagrams/out/preview-env.png">
-</picture>
+PR은 다음 조건을 모두 만족해야 한다.
 
----
+- `tapple-be` 저장소에서 만든 branch다.
+- 작성자는 `MEMBER`, `OWNER`, `COLLABORATOR` 중 하나다.
+- maintainer가 head repository와 작성자 관계를 확인했다.
+- maintainer가 `preview` label을 붙였다.
+- backend `cd-gitops`가 PR head SHA 이미지를 GHCR에 push했다.
 
-## 쓰는 법
+backend workflow는 same-repository와 author association을 fail-closed로 검사한다.
+ApplicationSet PR generator는 author association을 직접 필터링하지 못하고 `preview` label을 본다.
+따라서 `preview` label은 신뢰 검토를 끝냈다는 보안 승인이다.
+fork 또는 외부 PR에 이 label을 붙이지 않는다.
+외부 작성자는 label을 직접 붙일 권한을 갖지 않는다.
 
-```
-1. PR 을 연다
-2. `preview` 라벨을 붙인다          ← 이게 자리 예약이다
-3. 3~5분 뒤 Application·Deployment·Service와 PR database가 뜬다
-4. 다 봤으면 라벨을 떼거나 PR 을 닫는다
-```
+## 수명주기
 
-현재 `apps/preview/applicationset.yaml`의 host는 의도적으로 해석되지 않는
-`pr-<PR번호>-api.example.invalid`이고 `values-preview.yaml`의 `ingress.enabled`도 `false`다.
-host만 실제 값으로 바꿔서는 Ingress가 생기지 않는다. 외부 URL이 필요하면 Cloudflare proxied
-DNS, 실제 1단 host, PR별 origin TLS Secret 공급 방식을 함께 정한 뒤 명시적으로
-`ingress.enabled=true`를 넘겨야 한다. 차트는 `.invalid` host, 빈 TLS, host와 다른 TLS host,
-Traefik이 아닌 class를 거부하고 `websecure(:443)`만 사용한다. 동시에 ApplicationSet의
-`PUBLIC_*`·`CORS_ALLOWED_ORIGINS`·redirect URI도 같은 실제 HTTPS host로 바꿔야 한다.
+```text
+trusted PR + preview label
+  -> backend image:<head SHA 12자리>
+  -> ApplicationSet poll
+  -> Argo Application
+  -> createdb Job
+  -> Deployment + Service
 
-**라벨을 붙였는데 workload가 안 뜬다면** 3~5분을 기다렸는지 확인한다. 이미지 빌드(약
-2~3분) → ArgoCD가 PR 목록을 다시 읽는 주기(2분)를 거쳐야 한다.
-
-## 무엇이 격리되고 무엇이 공유되나
-
-| | 격리 | 비고 |
-|---|---|---|
-| Service | **PR마다 다름** | `tapple-server-pr-27` / `tapple-server-pr-28`; 외부 주소는 아직 없음 |
-| database | **PR마다 다름** | `tapple_pr27` / `tapple_pr28` |
-| 앱 프로세스 | **PR마다 다름** | 서로 재시작해도 무관 |
-| PostgreSQL 인스턴스 | 공유 | 한 대를 나눠 쓴다. 이게 죽으면 프리뷰 전부가 같이 죽는다 |
-| 모니터링 스택 | 공유 | Grafana에서 `Service` 드롭다운으로 `taple-pr27` 선택 |
-| 시크릿 | 공유 | 프리뷰 환경의 app·DB·GHCR credential을 모든 PR이 같이 쓴다 |
-
-A가 마이그레이션을 추가해도 B의 database에는 영향이 없다. 각자 Flyway가 자기 database에 스키마를 만든다.
-
-**내부의 신뢰된 PR만 대상이다.** PR별 시크릿 격리가 없으므로 fork나 외부 기여
-PR에는 `preview` 라벨을 붙이지 않는다. 외부 PR을 받게 되면 PR별 credential과
-namespace 격리를 먼저 설계해야 한다.
-
-## 동시에 몇 개까지
-
-**6개.** 무제한이 아니다.
-
-```
-명시된 상주 request 뒤 계산상 여유  약 7.05Gi
-PR 당        1Gi
+label 제거 또는 PR close
+  -> workload prune
+  -> PostDelete dropdb Job
+  -> Application 삭제
 ```
 
-`preview-budget` ResourceQuota가 Deployment 6개, requests 7680Mi/1800m,
-memory limits 14Gi를 강제한다. 공유 DB와 동시에 실행되는 createdb·cleanup Job의
-여유까지 포함한 정책 상한이다. 7번째 PR에 라벨을 붙이면 Argo CD sync가 quota에서 거부된다.
-계산에는 Traefik·일부 k3s 시스템 파드와 실제 사용량이 빠져 있으므로 실제 IDC에서 6개 동시
-안정성을 부하·eviction으로 다시 확인한다.
-안 쓰는 PR의 라벨을 떼면 자리가 난다.
+ApplicationSet은 120초마다 PR을 확인한다.
+Application 이름은 `tapple-preview-<PR번호>`다.
+workload 이름은 `tapple-server-pr-<PR번호>`다.
+database 이름은 `tapple_pr<PR번호>`다.
+관측 service name은 `taple-pr<PR번호>`다.
 
-**`preview` 라벨이 곧 자리 예약이다.** 다 봤으면 떼는 게 예의다.
+## 격리 범위
 
-## 되는 것 / 안 되는 것
+모든 프리뷰는 `preview` namespace를 공유한다.
+모든 프리뷰는 PostgreSQL Pod 한 대를 공유한다.
+각 PR은 database를 따로 사용한다.
+동시 Deployment 수와 namespace 자원은 ResourceQuota가 제한한다.
+PSA `restricted:v1.36`이 enforce된다.
+default-deny NetworkPolicy가 ingress와 egress를 차단한다.
+앱은 DNS, preview PostgreSQL, OTel Collector, private CIDR을 제외한 public HTTPS만 사용할 수 있다.
+prod와 dev DB 경로는 허용하지 않는다.
 
-| | |
-|---|---|
-| ✅ API 호출·응답 확인 | 승인 kubeconfig로 Service를 port-forward한 뒤 `curl`·Postman 사용 |
-| ✅ Swagger | port-forward 주소의 `/swagger-ui.html`로 계약 확인 |
-| ✅ DB 직접 접속 | [db-access.md §3-2](db-access.md) — 쓰기도 열려 있다 |
-| ✅ 앱 로그 | `kubectl logs -n preview -l app.kubernetes.io/instance=tapple-preview-<번호>` |
-| ✅ 마이그레이션 시험 | 자기 database라 마음껏 |
-| ❌ **구글 로그인** | 아래 참고 |
-| ❌ 파일 업로드(S3) | 자격증명이 더미다 |
-| ❌ Discord 알림 | 더미다 |
+이 구조는 PR 사이의 강한 보안 격리가 아니다.
+모든 PR은 같은 `app-secrets`와 `postgres-app` Secret을 사용한다.
+모든 PR은 같은 `tapple_preview_app` database role을 사용한다.
+그 role은 여러 `tapple_pr<N>` database의 owner가 된다.
+신뢰된 내부 코드는 다른 preview database에 접근하거나 public HTTPS로 preview Secret을 내보낼 수 있다.
+따라서 상호 불신 코드, fork, 외부 기여 코드는 절대 실행하지 않는다.
+상호 불신 실행이 필요해지면 PR별 credential, namespace, NetworkPolicy, database role을 함께 분리한다.
 
-### 구글 로그인이 안 되는 이유
+## 확인 방법
 
-Google OAuth는 리다이렉트 URI를 **와일드카드 없이 사전 등록**해야 하고 **HTTPS만** 받는다.
-프리뷰는 외부 Ingress가 꺼져 있고, 나중에 켜더라도 PR마다 주소가 달라 callback을 미리 열거하지
-않는다.
-
-같은 이유로 **지금 dev 환경도 로그인이 안 된다.** 프리뷰가 만든 제약이 아니라 실도메인+TLS가 붙기 전의 공통 한계다.
-
-로그인이 필요한 화면은 HTTPS와 OAuth callback이 연결된 운영 도메인에서 확인한다.
-
-## FE 개발자가 붙는 법
-
-프리뷰의 CORS에 로컬 개발 서버 주소가 열려 있다. 현재는 팀원 kubeconfig로 Service를
-port-forward한 로컬 주소를 쓴다.
-
-```
-http://localhost:3000
-http://localhost:5173
-```
+현재 외부 URL은 없다.
+일반 maintainer는 승인된 Grafana 계정으로 `taple-pr<번호>`를 선택해 로그, metric, trace를 본다.
+kubectl과 port-forward는 인프라 관리자만 사용한다.
 
 ```bash
-kubectl -n preview port-forward service/tapple-server-pr-27 8080:80
+kubectl get application -n argocd tapple-preview-27
+kubectl get deployment/tapple-server-pr-27 service/tapple-server-pr-27 \
+  job/tapple-server-pr-27-createdb -n preview
+kubectl port-forward -n preview service/tapple-server-pr-27 18080:80
+curl -fsS http://127.0.0.1:18080/actuator/health
 ```
 
-FE 로컬 `.env`의 API 주소를 바꾼다.
+실제 HTTPS host, Cloudflare proxied DNS, PR별 TLS 공급 경로를 설계한 뒤에만 Ingress를 켠다.
+HTTP placeholder와 `.example.invalid` host는 외부 공개 경로가 아니다.
+Google OAuth는 동적 callback URL을 사전 등록하지 않으므로 프리뷰에서 지원하지 않는다.
 
-```
-VITE_SERVER_API_URL=http://127.0.0.1:8080/v1
-```
+## database 생성
 
-BE가 `dev`에 머지하기를 기다리지 않고 PR 단계에서 바로 붙어볼 수 있다.
+createdb Job은 앱보다 먼저 실행된다.
+허용 owner는 `tapple_preview_app` 하나다.
+없는 `tapple_pr<N>` database만 생성하므로 재실행해도 안전하다.
+admin Secret은 상시 platform `secrets` Application이 관리한다.
 
----
-
-## 운영자용
-
-### 구조
-
-```
-apps/preview/applicationset.yaml   PR 생성기 — preview 라벨 붙은 PR 만
-apps/preview/postgres.yaml         공유 DB Application
-manifests/postgres-preview/        공유 postgres + 고아 database 정리 CronJob
-charts/tapple-server/values-preview.yaml
-charts/tapple-secrets/              Secrets Manager JSON·SecretStore·ExternalSecret 계약
-```
-
-앱 레포(`tapple-be`)의 `cd-gitops.yml`이 `preview` 라벨 붙은 PR의 이미지를 ghcr에 올린다. ApplicationSet은 **PR head SHA**로 그 이미지를 당긴다.
-
-### 시크릿 구성·갱신
-
-시크릿 원본은 Git이 아니라 AWS Secrets Manager에 **환경별 Kubernetes Secret
-계약 하나당 JSON Secret 하나**로 둔다. GHCR처럼 명시적으로 공유하는 값만 하나의
-JSON Secret을 여러 namespace가 재사용한다. External Secrets Operator가 명시된 JSON
-property만 읽어 기존 Kubernetes Secret 이름으로 동기화한다.
-
-| 용도 | Secrets Manager 이름 / JSON property | Kubernetes Secret |
-|---|---|---|
-| 프리뷰 앱 | `/tapple/preview/app-secrets` / 앱 환경변수 properties | `app-secrets` |
-| 프리뷰 DB | `/tapple/preview/postgres-preview-secrets` / `POSTGRES_USER`, `POSTGRES_PASSWORD` | `postgres-preview-secrets` |
-| GHCR pull | `/tapple/shared/ghcr-pull` / `dockerconfigjson` | `ghcr-pull` (`.dockerconfigjson` key) |
-| PR 목록 조회 | `/tapple/platform/argocd/preview-github-token` / `token` | `preview-github-token` |
-
-`/tapple/preview/*`는 `preview` namespace의 namespaced `SecretStore`만 읽을 수 있고,
-`/tapple/shared/*`에는 환경 공유를 명시적으로 허용한 GHCR Docker config만 둔다.
-prod/dev 시크릿을 preview에 복사하지 않는다. 전체 Secrets Manager JSON 계약과 최초 구성 절차는
-[`secrets/README.md`](../secrets/README.md)를 따른다.
-
-Secrets Manager version을 갱신하면 ESO가 최대 1시간 안에 다시 읽는다. 즉시 반영해야 하면 해당
-`ExternalSecret`에 `external-secrets.io/force-sync` 애노테이션을 갱신한다. 앱은
-`envFrom`으로 값을 받으므로 Secret 동기화 후 프리뷰 Deployment를 재시작해야 한다.
-
-`/tapple/platform/argocd/preview-github-token`의 `token`은 fine-grained PAT이고 `tapple-be`에
-`Contents: Read` + `Pull requests: Read`만 있으면 된다. **만료되면 프리뷰가 조용히 안 뜬다** —
-ApplicationSet 상태에 `error fetching Secret token`이 찍힌다.
-
-### 정리
-
-PR을 닫으면 Application·Deployment·Service가 자동으로 사라진다. Ingress는 현재 생성되지
-않으며 나중에 명시적으로 켠 경우 함께 삭제된다. **database는 남는다** — ApplicationSet이
-지우는 건 k8s 리소스뿐이고 database는 postgres 안의 객체다.
-
-`preview-db-cleanup` CronJob이 매주 월요일 04:30에 **7일 넘게 접속이 없는** `tapple_pr%` database를 지운다.
-
-즉시 지우려면:
 ```bash
-kubectl exec -n preview postgres-preview-0 -- psql -U tapple -d preview_bootstrap \
-  -c 'DROP DATABASE tapple_pr27'
+kubectl get job -n preview tapple-server-pr-27-createdb
+kubectl logs -n preview job/tapple-server-pr-27-createdb
 ```
 
-### 밟기 쉬운 함정 (구축 중 실제로 밟은 것)
+## database 삭제
 
-- **PR 생성기의 라벨 필터는 `github.labels`에 있다.** `filters[]`는 `branchMatch`·`targetBranchMatch`·`titleMatch`만 받는다. `filters[].labels`로 쓰면 admission이 unknown field로 거부한다
-- **Go 템플릿의 `slice`는 문자열에 못 쓴다.** `{{ slice .head_sha 0 12 }}`는 `list should be type of slice or array but string`으로 죽는다. sprig의 `substr`을 쓰되 **인자 순서가 `(start, end, string)`으로 반대**다
-- **PR 이벤트의 기본 체크아웃은 머지 커밋이다.** 그대로 빌드하면 이미지 태그가 머지 커밋 SHA가 되는데 ApplicationSet은 `head_sha`를 본다 → 찾는 이미지가 없다. `cd-gitops.yml`이 `ref: head.sha`로 체크아웃하는 이유
-- **PR별 URL 계열은 공유 Secrets Manager JSON에 넣지 않는다.** `CORS_ALLOWED_ORIGINS`·`PUBLIC_*`·`*_REDIRECT_URI`는 PR마다 호스트가 달라야 한다. `/tapple/preview/app-secrets`는 모든 프리뷰가 공유하므로, 이 값들은 ApplicationSet이 차트 `env`로 주입한다
+PR을 닫거나 label을 떼면 Argo CD가 Application 리소스를 먼저 prune한다.
+그 뒤 `PostDelete` hook이 같은 `createDatabase.name`을 삭제한다.
+렌더와 runtime은 `^tapple_pr[0-9]+$`만 허용한다.
+`postgres`, template, bootstrap, prod, dev 이름은 명시적으로 거부한다.
+cleanup은 접속 시각이나 파일 수정 시각을 추측하지 않는다.
 
-### 과거 실측 기록 (2026-08-11 · 현재 Ingress hardening 전)
+dropdb Job은 기존 연결을 강제로 끊지 않는다.
+연결, Secret, DB 장애로 DROP이 실패하면 Application은 `DeletionError`로 남는다.
+실패 Job도 원인 확인을 위해 남는다.
+원인을 고친 뒤 Application 삭제를 다시 시도한다.
 
-PR #27로 당시 전 과정을 확인했다. 아래 외부 HTTP와 Ingress 삭제 결과는 2026-08-31의
-fail-closed 기본값 도입 전 snapshot이며 현재 desired state를 뜻하지 않는다.
+```bash
+kubectl get application -n argocd tapple-preview-27
+kubectl get job -n preview tapple-server-pr-27-dropdb
+kubectl logs -n preview job/tapple-server-pr-27-dropdb
+```
 
-| 단계 | 결과 |
-|---|---|
-| `preview` 라벨 → 이미지 빌드 | 성공 (head SHA `d0bc9782dee4`) |
-| ApplicationSet → Application 생성 | `tapple-preview-27` |
-| `createdb` Job | `CREATE DATABASE` / `database 준비 완료: tapple_pr27` |
-| Flyway | `tapple_pr27`에 테이블 16개 |
-| 외부 접근 | `HTTP 200` / `{"status":"UP"}` |
-| prod DB 영향 | 없음 (16개 그대로) |
-| 팀원 kubeconfig로 DB 접속 | `OK: tapple_pr27 / tapple / 테이블 16개` |
-| PR 닫음 | Application·Deployment·Service·Ingress 자동 삭제 |
-| 닫은 뒤 database | `tapple_pr27` 남음 (설계대로) |
+수동 DROP은 자동 hook을 복구할 수 없는 경우에만 인프라 관리자가 수행한다.
+대상 이름을 다시 확인하고 preview bootstrap database에 접속한다.
+
+```bash
+kubectl exec -it -n preview postgres-preview-0 -- sh -ceu '
+  target_db=tapple_pr27
+  suffix="${target_db#tapple_pr}"
+  case "$suffix" in ""|*[!0-9]*) exit 64 ;; esac
+  exec dropdb -U "$POSTGRES_USER" "$target_db"
+'
+```
+
+## 운영 준비
+
+- `/tapple/platform/argocd/preview-github-token`은 PR read-only PAT를 가진다.
+- `/tapple/preview/app-secrets`는 prod와 dev 값을 재사용하지 않는다.
+- `/tapple/preview/postgres-app`은 shared preview app password를 가진다.
+- `/tapple/preview/postgres-preview-secrets`는 preview 관리자 자격증명을 가진다.
+- `/tapple/shared/ghcr-pull`은 read-only package credential을 가진다.
+- 5개 관련 ExternalSecret이 `Ready=True`인지 확인한다.
+- `preview` label 권한을 신뢰된 maintainer로 제한한다.
+- fork PR에 label을 붙여도 backend image가 생성되지 않는지 실제로 확인한다.
+
+## 알려진 tradeoff
+
+한 namespace와 한 PostgreSQL은 메모리를 아낀다.
+대신 PR 사이 credential과 DB trust boundary가 없다.
+SHA tag는 ApplicationSet만으로 즉시 프리뷰를 만들 수 있다.
+대신 prod와 dev의 immutable digest 수준은 제공하지 않는다.
+PostDelete hook은 정확한 PR database만 지운다.
+대신 연결이 남으면 자동 정리보다 안전한 실패를 선택한다.

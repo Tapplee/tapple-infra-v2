@@ -11,7 +11,7 @@ IDC 공급자에 달려 있어 전체 RTO는 수시간이 될 수 있다. 실제
 
 - 전용 AWS S3 backup bucket에 있어야 하는 것: 같은 실행 이름의 최신
   `*.dump`·`*.dump.sha256`·`*.dump.complete` 세 객체
-- AWS에 남아 있어야 하는 것: `/tapple/` 이름의 Secrets Manager JSON Secret,
+- AWS에 남아 있어야 하는 것: [시크릿 계약](../secrets/README.md)의 JSON source 16개,
   `tapple-external-secrets-iam`과 `tapple-postgres-backup-s3` CloudFormation stack,
   환경별 `tapple-secrets-*` IAM Role
 - 운영자 비밀 관리 도구에 있어야 하는 것: `tapple-external-secrets-bootstrap` access key.
@@ -28,6 +28,7 @@ IDC 공급자에 달려 있어 전체 RTO는 수시간이 될 수 있다. 실제
   bootstrap에서 `--ask-become-pass`를 썼다면 검증은 root로 하거나 해당 계정의 제한된
   passwordless `k3s` 실행 권한을 먼저 준비한다. restore는 stdin을 써서 sudo 암호를 받을 수 없다.
 - `charts/tapple-secrets/values.yaml`의 AWS 계정 ID가 실제 계정으로 커밋되어 있어야 한다.
+- prod 앱 role은 `tapple_app`이고 `/tapple/prod/postgres-app`의 password를 사용해야 한다.
 
 ## 절차
 
@@ -75,7 +76,7 @@ ansible-playbook playbooks/bootstrap.yml
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" '
   set -eu
   test "$(sudo -n k3s kubectl get secretstore -A --no-headers | wc -l)" -eq 10
-  test "$(sudo -n k3s kubectl get externalsecret -A --no-headers | wc -l)" -eq 15
+  test "$(sudo -n k3s kubectl get externalsecret -A --no-headers | wc -l)" -eq 20
 '
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
   'sudo -n k3s kubectl rollout status deployment/external-secrets -n external-secrets --timeout=300s'
@@ -245,9 +246,9 @@ ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
   < "$BACKUP_FILE"
 # production DB를 지우기 전에 같은 새 노드의 임시 DB에 실제 restore하고 relation 존재를 확인한다.
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
-  'sudo -n k3s kubectl exec -n db postgres-0 -- sh -ceu '\''dropdb --if-exists --force -U "$POSTGRES_USER" tapple_restore_verify; createdb -U "$POSTGRES_USER" tapple_restore_verify'\'''
+  'sudo -n k3s kubectl exec -n db postgres-0 -- sh -ceu '\''dropdb --if-exists --force -U "$POSTGRES_USER" tapple_restore_verify; createdb -U "$POSTGRES_USER" -O tapple_app tapple_restore_verify'\'''
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
-  'sudo -n k3s kubectl exec -i -n db postgres-0 -- sh -ceu '\''pg_restore --exit-on-error --no-owner -U "$POSTGRES_USER" -d tapple_restore_verify'\''' \
+  'sudo -n k3s kubectl exec -i -n db postgres-0 -- sh -ceu '\''pg_restore --exit-on-error --no-owner --role=tapple_app -U "$POSTGRES_USER" -d tapple_restore_verify'\''' \
   < "$BACKUP_FILE"
 RESTORED_RELATIONS="$(ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
   'sudo -n k3s kubectl exec -n db postgres-0 -- sh -ceu '\''psql -At -U "$POSTGRES_USER" -d tapple_restore_verify -c "select count(*) from pg_catalog.pg_class where relkind in ('\''\''r'\''\'', '\''\''p'\''\'') and relnamespace not in (select oid from pg_catalog.pg_namespace where nspname like '\''\''pg_%'\''\'' or nspname = '\''\''information_schema'\''\'')"'\''' )"
@@ -255,9 +256,9 @@ test "$RESTORED_RELATIONS" -gt 0
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
   'sudo -n k3s kubectl exec -n db postgres-0 -- sh -ceu '\''dropdb --force -U "$POSTGRES_USER" tapple_restore_verify'\'''
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
-  'sudo -n k3s kubectl exec -n db postgres-0 -- sh -ceu '\''dropdb --if-exists --force -U "$POSTGRES_USER" "$POSTGRES_DB"; createdb -U "$POSTGRES_USER" "$POSTGRES_DB"'\'''
+  'sudo -n k3s kubectl exec -n db postgres-0 -- sh -ceu '\''dropdb --if-exists --force -U "$POSTGRES_USER" "$POSTGRES_DB"; createdb -U "$POSTGRES_USER" -O tapple_app "$POSTGRES_DB"'\'''
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
-  'sudo -n k3s kubectl exec -i -n db postgres-0 -- sh -ceu '\''pg_restore --exit-on-error --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB"'\''' \
+  'sudo -n k3s kubectl exec -i -n db postgres-0 -- sh -ceu '\''pg_restore --exit-on-error --no-owner --role=tapple_app -U "$POSTGRES_USER" -d "$POSTGRES_DB"'\''' \
   < "$BACKUP_FILE"
 
 # restore가 끝났으므로 postgres auto-sync를 먼저 복구한다. 이 sync가 CronJob을 Git의
@@ -265,7 +266,7 @@ ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
   "sudo -n k3s kubectl patch application postgres -n argocd --type=merge -p '{\"spec\":{\"syncPolicy\":{\"automated\":{\"prune\":true,\"selfHeal\":true}}}}'"
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
-  'sudo -n k3s kubectl delete job/postgres-readonly-role -n db --ignore-not-found'
+  'sudo -n k3s kubectl delete job/postgres-app-role job/postgres-readonly-role -n db --ignore-not-found'
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" '
   set -eu
   sudo -n k3s kubectl annotate application/postgres -n argocd \
@@ -278,6 +279,10 @@ ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" '
     sleep 2
   done
 '
+ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
+  'sudo -n k3s kubectl wait --for=create job/postgres-app-role -n db --timeout=300s'
+ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
+  'sudo -n k3s kubectl wait --for=condition=Complete job/postgres-app-role -n db --timeout=300s'
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
   'sudo -n k3s kubectl wait --for=create job/postgres-readonly-role -n db --timeout=300s'
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
@@ -318,10 +323,10 @@ ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
 #    grafana-k3s 레코드도 같이 바꿀 것 (docs/monitoring-access.md)
 curl -fsS "${PROD_API_URL%/}/actuator/health"
 
-# 12. Grafana 팀원 계정 재등록
+# 12. 승인된 Grafana 사용자 계정 재등록
 #    사용자 목록은 Grafana 의 sqlite(PVC)에 있어 Git 이 복원해주지 않는다.
 #    대시보드·데이터소스는 자동 복원되므로 사람만 다시 넣으면 된다.
-#    절차: docs/monitoring-access.md 의 "팀원 등록"
+#    절차: docs/monitoring-access.md 의 "사용자 승인과 회수"
 
 # 13. restore controller의 임시 dump·checksum·marker를 폐기한다. 중간 실패·signal에서도
 #     EXIT trap이 위에서 만든 정확한 세 파일과 빈 임시 디렉터리만 정리한다.
@@ -339,7 +344,7 @@ trap - EXIT HUP INT TERM
 - [ ] `k3s kubectl get pod postgres-0 -n db -o jsonpath='{.status.qosClass}'` = Guaranteed
 - [ ] 앱 → DB 쿼리 정상 (헬스체크 200)
 - [ ] 다음 pg-backup CronJob 성공과 S3 `.complete` marker 확인
-- [ ] Grafana 로그인 + 팀원 계정 재등록 완료 (Git 이 복원하지 않는 유일한 상태)
+- [ ] Grafana 로그인 + 승인 사용자 계정 재등록 완료 (Git 이 복원하지 않는 유일한 상태)
 
 `aws-bootstrap`은 재해 복구 때 매번 재생성하는 secret-zero다. Kubernetes Secret이나
 과거 노드의 datastore에서 복사하지 않는다. Store가 `AccessDenied`라면 Secret value를

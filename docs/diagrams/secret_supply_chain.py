@@ -54,11 +54,11 @@ def build(theme: dict) -> None:
         with Cluster("GitOps contract · 값 없음", graph_attr=ca):
             secrets_app = Argocd("secrets Application\nwave -1", fontcolor=fg)
             stores = CRD(
-                "namespaced SecretStore\n환경 role · prefix",
+                "namespaced SecretStore 10\n환경 role · prefix",
                 fontcolor=fg,
             )
             external = CRD(
-                "ExternalSecret\nexpected key/property 계약\nPeriodic 1h",
+                "ExternalSecret 20\nexpected key/property 계약\nPeriodic 1h",
                 fontcolor=fg,
             )
 
@@ -72,7 +72,7 @@ def build(theme: dict) -> None:
                 fontcolor=fg,
             )
             manager = SecretsManager(
-                "AWS Secrets Manager\nKubernetes Secret 계약별 JSON\n환경 prefix로 격리",
+                "AWS Secrets Manager\nJSON source 16\n환경 prefix로 격리",
                 fontcolor=fg,
             )
 
@@ -83,7 +83,7 @@ def build(theme: dict) -> None:
                 fontcolor=fg,
             )
             workloads = Deployment(
-                "PostgreSQL · app · monitoring\nenv/envFrom 변경 시 rollout",
+                "PostgreSQL · app · monitoring\n앱 DB role은 admin과 분리",
                 fontcolor=fg,
             )
 

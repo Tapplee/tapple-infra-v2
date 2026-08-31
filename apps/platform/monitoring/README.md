@@ -1,6 +1,6 @@
 # monitoring — 기존 compose 스택(ADR-014)의 k8s 이식
 
-[tapple-infra의 monitoring/grafana](https://github.com/Tapplee/tapple-infra/tree/main/monitoring/grafana)에서 docker-compose로 운영하던 스택을 기반으로 옮겼다. **알림 규칙·대시보드**를 고정하고 retention과 보안 패치는 현재 k3s 운영 정책에 맞췄다. 차트는 upstream + `valuesObject` 인라인 (D16).
+[tapple-infra의 monitoring/grafana](https://github.com/Tapplee/tapple-infra/tree/main/monitoring/grafana)에서 docker-compose로 운영하던 스택을 기반으로 옮겼다. **알림 규칙·대시보드**를 고정하고 retention과 보안 패치는 현재 k3s 운영 정책에 맞췄다. 차트는 upstream + `valuesObject` 인라인 (D17).
 
 | Application | upstream 차트 | 고정 이미지 | 비고 |
 |---|---|---|---|

@@ -41,7 +41,10 @@ def build(theme: dict) -> None:
         edge_attr=edge_attr(theme),
     ):
         repo = Github("tapple-infra-v2\nmain", fontcolor=fg)
-        root = Argocd("root Application\napps/ 재귀 sync", fontcolor=fg)
+        root = Argocd(
+            "root Application\n7 projects wave -100\n+ default deny -99",
+            fontcolor=fg,
+        )
 
         wave_cluster = Argocd(
             "wave -3\ncluster\nApplication 1",

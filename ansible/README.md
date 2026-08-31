@@ -2,7 +2,7 @@
 
 Ubuntu 22.04/24.04 x86_64 서버 한 대에 호스트 기본 설정, K3s,
 Argo CD, ESO의 AWS bootstrap Secret, root Application을 순서대로 구성한다.
-Kubernetes API `6443`은 기본적으로 외부에 열지 않는다. 팀원 kubeconfig가 필요하면
+Kubernetes API `6443`은 기본적으로 외부에 열지 않는다. 인프라 관리자 원격 접근이 필요하면
 고정 egress 또는 VPN CIDR만 별도 allowlist에 넣는다.
 이 전용 노드의 UFW 인바운드 allow 규칙은 플레이북이 전부 소유한다. 방화벽 변경 전에
 인바운드 deny/reject, `ufw route allow/limit`, 공백 때문에 안전하게 토큰화할 수 없는 quoted
@@ -28,7 +28,7 @@ cp inventories/idc/hosts.example.yml inventories/idc/hosts.yml
 - `ansible_host`: IDC 서버 주소
 - `ansible_user`: SSH key와 sudo를 사용할 수 있는 계정. 초기 root key 접속도 가능하다.
 - `common_admin_ssh_cidrs`: SSH를 허용할 관리자 공인 CIDR
-- `common_k3s_api_cidrs`: 선택 사항. 제한된 kubeconfig 접근을 허용할 팀/VPN CIDR
+- `common_k3s_api_cidrs`: 선택 사항. 관리자 kubeconfig 접근을 허용할 infra VPN CIDR
 - `bootstrap_confirm`: 모든 값을 확인한 다음에만 `true`
 
 CIDR는 host bit와 IPv6 축약까지 canonical 표기로 쓴다. 예를 들어
@@ -63,8 +63,8 @@ ansible-playbook playbooks/bootstrap.yml
 예측할 수 없다. 전체 검증 대신 syntax와 preflight 검사를 먼저 실행한다.
 
 정상 종료 조건은 root Application 생성이 아니라 `Synced`와 `Healthy`다. custom health가
-모든 child Application과 10개 SecretStore·15개 ExternalSecret의 준비 상태를 전달하므로,
-13개 AWS source 중 하나라도 빠지면 최대 30분 뒤 playbook이 실패한다. 실패 상태를 고친 뒤
+모든 child Application과 10개 SecretStore·20개 ExternalSecret의 준비 상태를 전달하므로,
+16개 AWS source 중 하나라도 빠지면 최대 30분 뒤 playbook이 실패한다. 실패 상태를 고친 뒤
 같은 명령을 다시 실행하면 이어서 수렴한다. 재실행 때도 과거 Healthy 상태를 오인하지 않도록
 root에 hard refresh를 요청하고 Argo CD가 그 annotation을 소비한 뒤 상태를 기다린다.
 
@@ -77,8 +77,8 @@ K3s는 `system-reserved=cpu=1000m,memory=2Gi`와 함께 memory·disk·inode hard
 Argo CD upstream 설치 manifest의 모든 workload container와 init container에는 설치 직후
 resource request/limit patch를 적용한다. 새 upstream 버전에서 container가 늘어났는데 patch가
 없으면 정적 검증이 실패해야 한다. 앱·DB·모니터링·ESO·Argo CD namespace의 Pod Security
-Admission은 `restricted:v1.36` **warn/audit만** 켠다. 현재 upstream workload를 갑자기 막지
-않고 위반을 먼저 수집하려는 단계이며, audit가 깨끗해진 뒤에만 enforce를 검토한다.
+Admission은 앱·DB·preview·ESO namespace에서 `restricted:v1.36`을 enforce한다.
+upstream chart 호환이 남은 monitoring과 argocd namespace는 restricted warn/audit만 적용한다.
 
 ## AWS bootstrap 자격증명
 

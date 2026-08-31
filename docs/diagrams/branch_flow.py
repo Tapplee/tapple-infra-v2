@@ -3,7 +3,7 @@
 cicd_flow.py 는 "push 하면 어떻게 배포되나"를 그린다. 이 그림은 그 앞단이다:
 기능 브랜치를 따서 dev 를 거쳐 prod 까지 올리는 순서와, 잘못됐을 때 되돌리는 두 경로.
 
-혼자 운영하는 전제다. 앱 승격은 사람이 결정하고, 각 환경의 infra tag 변경은 PR·필수 CI·
+앱 승격은 사람이 결정하고, 각 환경의 infra tag+digest 변경은 PR·필수 CI·
 squash auto-merge를 거친다. 조직 2FA와 branch protection은 순서가 있는 컷오버 작업이다.
 
     python branch_flow.py   →  out/branch-flow.png, out/branch-flow-dark.png
@@ -51,7 +51,7 @@ def build(theme: dict) -> None:
         node_attr=node_attr(theme),
         edge_attr=edge_attr(theme),
     ):
-        me = User("개발자\n(혼자)", **dark_icon_panel(theme, width="1.25"))
+        me = User("maintainer", **dark_icon_panel(theme, width="1.25"))
 
         with Cluster("tapple-be", graph_attr=ca):
             feat = Git("feat/xxx\n기능 브랜치")
@@ -62,14 +62,14 @@ def build(theme: dict) -> None:
         cd_prod = GithubActions("cd-gitops.yml\nprod run")
 
         with Cluster("tapple-infra-v2", graph_attr=ca):
-            pr_dev = Github("deploy/dev/<sha>\nvalues-dev tag PR", **dark_panel)
-            pr_prod = Github("deploy/prod/<sha>\nvalues tag PR", **dark_panel)
+            pr_dev = Github("deploy/dev/<tag>-<digest>\nvalues-dev image PR", **dark_panel)
+            pr_prod = Github("deploy/prod/<tag>-<digest>\nvalues image PR", **dark_panel)
             checks = GithubActions("Static validation\nrequired · strict")
             infra_main = Github(
                 "origin/main\nstaged: 2FA 수동 → protection\nPR only · approval 0",
                 **dark_icon_panel(theme, width="2.1"),
             )
-            revert_pr = Git("known-good tag\nrevert PR")
+            revert_pr = Git("known-good tag + digest\nrevert PR")
 
         argo = Argocd("ArgoCD\nself-heal")
 
@@ -84,7 +84,7 @@ def build(theme: dict) -> None:
         feat >> Edge(label="② PR → Squash 머지", color=MANUAL, fontcolor=MANUAL) >> dev_br
 
         dev_br >> Edge(label="자동 트리거", color=AUTO, fontcolor=AUTO) >> cd_dev
-        cd_dev >> Edge(label="SHA image + PR", color=AUTO, fontcolor=AUTO) >> pr_dev
+        cd_dev >> Edge(label="SHA image + digest PR", color=AUTO, fontcolor=AUTO) >> pr_dev
         pr_dev >> Edge(label="필수 CI", color=AUTO, fontcolor=AUTO) >> checks
 
         dev_pod >> Edge(label="③ dev 에서 확인", color=MANUAL, fontcolor=MANUAL, style="dotted") >> me
@@ -92,7 +92,7 @@ def build(theme: dict) -> None:
                        color=MANUAL, fontcolor=MANUAL) >> main_br
 
         main_br >> Edge(label="자동 트리거", color=AUTO, fontcolor=AUTO) >> cd_prod
-        cd_prod >> Edge(label="SHA image + PR", color=AUTO, fontcolor=AUTO) >> pr_prod
+        cd_prod >> Edge(label="SHA image + digest PR", color=AUTO, fontcolor=AUTO) >> pr_prod
         pr_prod >> Edge(label="필수 CI", color=AUTO, fontcolor=AUTO) >> checks
         checks >> Edge(label="squash auto-merge", color=AUTO, fontcolor=AUTO) >> infra_main
         argo >> Edge(label="protected main pull", color=AUTO, fontcolor=AUTO,
@@ -104,7 +104,7 @@ def build(theme: dict) -> None:
         prod_pod >> Edge(label="문제 발견", color=BACK, fontcolor=BACK, style="dotted") >> me
         me >> Edge(label="ⓐ ArgoCD UI 에서 이전 버전 선택\n(빠름 · Git 은 그대로)",
                    color=BACK, fontcolor=BACK) >> argo
-        me >> Edge(label="ⓑ known-good tag revert PR\n(Git 이 정답지로 남음)",
+        me >> Edge(label="ⓑ known-good tag+digest revert PR\n(Git 이 정답지로 남음)",
                    color=BACK, fontcolor=BACK) >> revert_pr
         revert_pr >> Edge(label="필수 CI", color=BACK, fontcolor=BACK) >> checks
 

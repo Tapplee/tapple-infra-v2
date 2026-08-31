@@ -41,8 +41,8 @@ def build(theme: dict) -> None:
         developer = User("개발자", fontcolor=fg)
 
         with Cluster("tapple-be", graph_attr=ca):
-            pr = Github("PR #42\npreview 라벨", fontcolor=fg)
-            build = GithubActions("cd-gitops.yml\nhead SHA 빌드", fontcolor=fg)
+            pr = Github("same-repo trusted PR #42\npreview 라벨 = 보안 승인", fontcolor=fg)
+            build = GithubActions("cd-gitops.yml\nauthor + head repo 검증", fontcolor=fg)
 
         image = Docker("ghcr.io/tapplee/tapple-be\n:<PR head SHA>", fontcolor=fg)
 
@@ -63,12 +63,13 @@ def build(theme: dict) -> None:
             )
             with Cluster("PR마다 생성 · PR 종료 시 삭제", graph_attr=ca):
                 application = Argocd("Application\npr-42", fontcolor=fg)
-                ingress = Ingress("pr-42-api.<host>", fontcolor=fg)
+                ingress = Ingress("Ingress 기본 off\nDNS + TLS 뒤 enable", fontcolor=fg)
                 app = Deployment(
                     "tapple-server-pr-42\n1Gi · preview-lowest",
                     fontcolor=fg,
                 )
                 create_db = Job("createdb Job\ntapple_pr42", fontcolor=fg)
+                delete_db = Job("PostDelete dropdb\nexact tapple_pr42", fontcolor=fg)
 
             postgres = StatefulSet(
                 "postgres-preview\n모든 PR이 공유 · DB만 분리",
@@ -76,7 +77,7 @@ def build(theme: dict) -> None:
             )
 
         warning = Secret(
-            "격리 경계\nPR별 secret isolation 없음\n외부·fork PR 금지",
+            "격리 경계\nshared Secret + DB role\n외부·fork PR 금지",
             fontcolor=fg,
         )
 
@@ -86,7 +87,7 @@ def build(theme: dict) -> None:
             fontcolor=MANUAL,
         ) >> pr
         pr >> Edge(label="② 자동 빌드", color=AUTO, fontcolor=AUTO) >> build
-        build >> Edge(label="immutable image", color=AUTO, fontcolor=AUTO) >> image
+        build >> Edge(label="PR SHA tag", color=AUTO, fontcolor=AUTO) >> image
 
         appset >> Edge(
             label="③ PR 감지",
@@ -130,7 +131,7 @@ def build(theme: dict) -> None:
             fontcolor=AUTO,
         ) >> postgres
         ingress >> Edge(
-            label="⑤ URL 검증",
+            label="⑤ TLS 공개 뒤 URL 검증",
             color=MANUAL,
             fontcolor=MANUAL,
             style="dotted",
@@ -142,6 +143,18 @@ def build(theme: dict) -> None:
             fontcolor=DELETE,
             style="dashed",
         ) >> pr
+        application >> Edge(
+            label="삭제 후 hook",
+            color=DELETE,
+            fontcolor=DELETE,
+            style="dashed",
+        ) >> delete_db
+        delete_db >> Edge(
+            label="정확한 DB만 DROP\n실패 시 보존",
+            color=DELETE,
+            fontcolor=DELETE,
+            style="dashed",
+        ) >> postgres
         warning >> Edge(
             label="공유 credential",
             color=RISK,

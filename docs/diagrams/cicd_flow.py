@@ -1,6 +1,6 @@
 """CI/CD 배포 흐름 — 코드 push 부터 클러스터 반영까지.
 
-KubeDiagrams 로는 그릴 수 없다. "Actions 가 ghcr 에 밀고 인프라 tag PR을 열면 필수 CI 뒤
+KubeDiagrams 로는 그릴 수 없다. "Actions 가 ghcr 에 밀고 인프라 tag+digest PR을 열면 필수 CI 뒤
 merge되고 ArgoCD 가 감지한다"는 어떤 매니페스트에도 적혀 있지 않기 때문이다. 그래서 손으로 그린다.
 
 이 그림이 반드시 전달해야 하는 두 가지:
@@ -53,15 +53,15 @@ def build(theme: dict) -> None:
     ):
         dev = User("개발자", **dark_icon_panel(theme, width="1.25"))
 
-        with Cluster("tapple-be  (private)", graph_attr=ca):
+        with Cluster("tapple-be  (public)", graph_attr=ca):
             repo_be = Github("main / dev", **dark_panel)
             actions = GithubActions("cd-gitops.yml\n브랜치로 환경 판정")
 
-        registry = Docker("ghcr.io/tapplee/tapple-be\n:<커밋 SHA 12자리>")
+        registry = Docker("ghcr.io/tapplee/tapple-be\nSHA tag · immutable digest")
 
         with Cluster("tapple-infra-v2  (public)", graph_attr=ca):
-            bump = Git("deploy/<env>/<sha>\nimage.tag 1줄")
-            bump_pr = Github("tag bump PR", **dark_panel)
+            bump = Git("deploy/<env>/<tag>-<digest>\nimage.tag + image.digest")
+            bump_pr = Github("image bump PR", **dark_panel)
             checks = GithubActions("Static validation\nrequired · strict")
             repo_infra = Github(
                 "컷오버 후 origin/main\nPR only · squash\nadmin bypass 없음",
@@ -92,7 +92,7 @@ def build(theme: dict) -> None:
         argo >> Edge(label="values.yaml → Production", fontcolor=theme["fg"]) >> prod
         argo >> Edge(label="values-dev.yaml → Development", fontcolor=theme["fg"]) >> dev_app
 
-        prod >> Edge(label="⑦ 이미지 pull\n(ghcr-pull)", style="dotted",
+        prod >> Edge(label="⑦ digest pull\n(ghcr-pull)", style="dotted",
                      fontcolor=theme["fg"]) >> registry
         dev_app >> Edge(style="dotted") >> registry
 
