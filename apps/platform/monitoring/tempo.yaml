@@ -23,6 +23,9 @@ spec:
           tag: 2.10.5 # compose와 동일
           reportingEnabled: false
           retention: 168h # 로컬 tempo.yml block_retention 그대로 (7d)
+          # chart 기본 1024Mi ballast는 768Mi container limit보다 커서 시작부터
+          # OOM 위험이 있다. 256Mi만 예약해 나머지 512Mi를 heap/cache에 남긴다.
+          memBallastSizeMbs: 256
           receivers:
             otlp:
               protocols:

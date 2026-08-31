@@ -6,6 +6,7 @@ metadata:
   namespace: monitoring
 data:
   default-alerts.yml: |
+    # tapple-infra-v2 k3s topology 적용: target 없는 alert와 중복 generic alert 제거, render로 확인한 static target 추가
     groups:
       - name: taple.dashboard-services
         rules:
@@ -19,50 +20,24 @@ data:
 
       - name: taple.availability
         rules:
-          - alert: ApiServerDown
-            expr: up{job=~".*taple.*|.*api.*|.*server.*"} == 0
-            for: 2m
-            labels:
-              severity: critical
-            annotations:
-              summary: "API server target 연결을 확인해주세요"
-              description: "Prometheus가 job={{ $labels.job }}, instance={{ $labels.instance }} 를 scrape하지 못하고 있어요. target 상태와 네트워크를 확인해주세요."
-
-          # - alert: NodeExporterDown
-          #   expr: up{job="node-exporter"} == 0
-          #   for: 3m
-          #   labels:
-          #     severity: warning
-          #   annotations:
-          #     summary: "Node exporter is down"
-          #     description: "Host metrics are not being scraped from {{ $labels.instance }}."
-
-          - alert: PrometheusTargetDown
-            expr: up{job!="node-exporter"} == 0
+          # k3s에서는 아래 두 Service/port가 실제 Helm render에 존재한다.
+          - alert: NodeExporterDown
+            expr: up{job="node-exporter"} == 0
             for: 3m
             labels:
               severity: warning
             annotations:
-              summary: "Prometheus target 연결을 확인해주세요"
-              description: "job={{ $labels.job }}, instance={{ $labels.instance }} target을 3분 이상 scrape하지 못했어요. exporter와 네트워크 상태를 확인해주세요."
+              summary: "Node exporter scrape를 확인해주세요"
+              description: "instance={{ $labels.instance }} 의 exporter 또는 cluster 내부 scrape 경로가 3분 이상 응답하지 않아요. 전체 node/cluster 장애 탐지는 외부 모니터가 별도로 필요해요."
 
-          - alert: PostgreSQLDown
-            expr: up{job=~".*postgres.*"} == 0 or pg_up == 0
-            for: 1m
+          - alert: TempoDown
+            expr: up{job="tempo"} == 0
+            for: 3m
             labels:
-              severity: critical
+              severity: warning
             annotations:
-              summary: "PostgreSQL 연결을 확인해주세요"
-              description: "PostgreSQL exporter가 database unavailable 상태를 보냈어요. job={{ $labels.job }}, instance={{ $labels.instance }} 의 DB와 exporter를 확인해주세요."
-
-          - alert: RedisDown
-            expr: up{job=~".*redis.*|.*valkey.*"} == 0 or redis_up == 0
-            for: 1m
-            labels:
-              severity: critical
-            annotations:
-              summary: "Redis/Valkey 연결을 확인해주세요"
-              description: "Redis/Valkey exporter가 cache unavailable 상태를 보냈어요. job={{ $labels.job }}, instance={{ $labels.instance }} 의 cache와 exporter를 확인해주세요."
+              summary: "Tempo metrics endpoint를 확인해주세요"
+              description: "instance={{ $labels.instance }} 의 Tempo metrics endpoint를 3분 이상 scrape하지 못했어요. Tempo pod, Service와 storage 상태를 확인해주세요."
 
           - alert: OTelCollectorDown
             expr: up{job=~".*otel.*|.*collector.*"} == 0
@@ -373,24 +348,6 @@ data:
               summary: "DB connection timeout을 확인해주세요"
               description: "service={{ $labels.service_name }}, application={{ $labels.application }}, instance={{ $labels.instance }}, pool={{ $labels.pool }} 에서 최근 5분 안에 HikariCP connection acquisition timeout이 있었어요. DB 상태와 connection pool 포화 여부를 확인해주세요."
 
-          - alert: RedisMemoryHighUsage
-            expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.8
-            for: 10m
-            labels:
-              severity: warning
-            annotations:
-              summary: "Redis/Valkey memory usage가 80%를 넘었어요"
-              description: "instance={{ $labels.instance }} 의 Redis/Valkey memory usage가 10분 이상 80%를 넘었어요. key 증가량과 eviction 정책을 확인해주세요."
-
-          - alert: RedisRejectedConnections
-            expr: increase(redis_rejected_connections_total[5m]) > 0
-            for: 0m
-            labels:
-              severity: warning
-            annotations:
-              summary: "Redis rejected connection을 확인해주세요"
-              description: "instance={{ $labels.instance }} 의 Redis/Valkey에서 최근 5분 안에 rejected connection이 있었어요. maxclients와 client 재시도를 확인해주세요."
-
       - name: taple.observability
         rules:
           - alert: OTelCollectorLogExportFailures
@@ -437,30 +394,3 @@ data:
             annotations:
               summary: "Loki discarded sample을 확인해주세요"
               description: "job={{ $labels.job }}, instance={{ $labels.instance }} 의 Loki가 incoming log sample을 discard하고 있어요. rate limit, label cardinality, payload 크기를 확인해주세요."
-
-          - alert: SSLCertificateExpiresSoon
-            expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 14
-            for: 1h
-            labels:
-              severity: warning
-            annotations:
-              summary: "SSL certificate 만료일을 확인해주세요"
-              description: "instance={{ $labels.instance }} 의 SSL certificate가 14일 이내에 만료돼요. 갱신 일정과 자동 갱신 상태를 확인해주세요."
-
-          - alert: ExternalHttpHealthCheckFailed
-            expr: probe_success{job="blackbox-http"} == 0
-            for: 3m
-            labels:
-              severity: critical
-            annotations:
-              summary: "External HTTP health check를 확인해주세요"
-              description: "instance={{ $labels.instance }} 의 blackbox HTTP check가 3분 이상 실패했어요. endpoint, DNS, TLS 상태를 확인해주세요."
-
-          - alert: ApiHealthCheckFailed
-            expr: probe_success{instance=~".*/actuator/health"} == 0
-            for: 2m
-            labels:
-              severity: critical
-            annotations:
-              summary: "API health check를 확인해주세요"
-              description: "instance={{ $labels.instance }} 의 actuator health check가 2분 이상 실패했어요. app 상태와 dependency health를 확인해주세요."

@@ -1,6 +1,6 @@
 # Prometheus + Alertmanager + node-exporter — 기존 compose 스택(ADR-014)의 k8s 이식판
 # 버전·retention·알림 라우팅 전부 infra/monitoring/grafana 값 그대로
-# 수신 2경로 유지: ① OTLP write receiver ② scrape (앱 파드는 prometheus.io/scrape 어노테이션)
+# 수신 2경로 유지: ① 앱 metrics는 OTel의 OTLP push ② 플랫폼 metrics는 명시적 scrape
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -19,6 +19,11 @@ spec:
     targetRevision: 27.3.0
     helm:
       valuesObject:
+        configmapReload:
+          prometheus:
+            resources:
+              requests: { cpu: 10m, memory: 32Mi }
+              limits: { memory: 64Mi }
         server:
           image:
             tag: v3.11.3 # compose와 동일
@@ -36,7 +41,7 @@ spec:
           resources:
             requests: { cpu: 100m, memory: 768Mi }
             limits: { memory: 1Gi }
-          # 알림 규칙 468줄은 ConfigMap(manifests/monitoring/prometheus-alert-rules.yaml)로 마운트
+          # 알림 규칙은 ConfigMap(manifests/monitoring/prometheus-alert-rules.yaml)로 마운트
           extraConfigmapMounts:
             - name: alert-rules
               configMap: prometheus-alert-rules
@@ -46,8 +51,8 @@ spec:
           prometheus.yml:
             rule_files:
               - /etc/config/rules-extra/default-alerts.yml
-        # 로컬 prometheus.yml의 static 잡들 — k8s 서비스 DNS로 치환
-        # (앱은 차트 기본 kubernetes-pods 잡이 어노테이션 보고 수집하므로 별도 잡 불필요)
+        # 로컬 prometheus.yml의 static 잡들 — 실제 chart Service 이름/metrics port로 치환.
+        # 앱 metrics는 scrape target이 아니라 OTel Collector가 위 OTLP receiver로 push한다.
         extraScrapeConfigs: |
           - job_name: node-exporter
             static_configs:
@@ -57,6 +62,10 @@ spec:
           - job_name: loki
             static_configs:
               - targets: ['loki.monitoring.svc.cluster.local:3100']
+          - job_name: tempo
+            static_configs:
+              # tempo chart 1.18.0의 tempo-prom-metrics Service port
+              - targets: ['tempo.monitoring.svc.cluster.local:3100']
           - job_name: otel-collector
             static_configs:
               - targets: ['otel-collector.monitoring.svc.cluster.local:8888']

@@ -28,6 +28,14 @@ spec:
         resources:
           requests: { cpu: 100m, memory: 256Mi }
           limits: { memory: 512Mi }
+        # 사용하지 않는 receiver port는 Service에서도 닫고, Collector 자체 metrics만
+        # Prometheus가 scrape할 수 있게 연다.
+        ports:
+          jaeger-compact: { enabled: false }
+          jaeger-thrift: { enabled: false }
+          jaeger-grpc: { enabled: false }
+          zipkin: { enabled: false }
+          metrics: { enabled: true }
         config:
           receivers:
             # 로컬 스택의 bearer token 인증은 제거 — 클러스터 내부 ClusterIP 통신만 존재
@@ -42,6 +50,13 @@ spec:
             zipkin: null
             prometheus: null
           processors:
+            # chart 권장 percentage 설정으로 512Mi container limit의 80%(약 410Mi)를
+            # hard limit, 25%(128Mi)를 spike 여유로 둔다. 각 pipeline의 첫
+            # processor여야 backpressure가 먼저 걸린다.
+            memory_limiter:
+              check_interval: 5s
+              limit_percentage: 80
+              spike_limit_percentage: 25
             batch:
               send_batch_size: 1024
               timeout: 5s
@@ -63,15 +78,15 @@ spec:
             pipelines:
               metrics:
                 receivers: [otlp]
-                processors: [batch]
+                processors: [memory_limiter, batch]
                 exporters: [otlphttp/prometheus]
               traces:
                 receivers: [otlp]
-                processors: [probabilistic_sampler, batch]
+                processors: [memory_limiter, probabilistic_sampler, batch]
                 exporters: [otlphttp/tempo]
               logs:
                 receivers: [otlp]
-                processors: [batch]
+                processors: [memory_limiter, batch]
                 exporters: [otlphttp/loki]
   destination:
     server: https://kubernetes.default.svc

@@ -82,6 +82,11 @@ spec:
         gateway: { enabled: false }
         lokiCanary: { enabled: false }
         test: { enabled: false }
+        # single-binary의 rules watcher(k8s-sidecar)도 Burstable 자원 경계를 갖는다.
+        sidecar:
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 128Mi }
         monitoring:
           selfMonitoring:
             enabled: false
