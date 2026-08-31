@@ -98,9 +98,9 @@ jobs:
           preview_args=(
             --values charts/tapple-server/values-preview.yaml
             --set-string "image.tag=ci"
-            --set-string "fullnameOverride=tapple-server-pr-ci"
-            --set-string "createDatabase.name=tapple_pr_ci"
-            --set-string "ingress.host=pr-ci-api.example.invalid"
+            --set-string "fullnameOverride=tapple-server-pr-42"
+            --set-string "createDatabase.name=tapple_pr42"
+            --set-string "ingress.host=pr-42-api.example.invalid"
           )
           helm lint charts/tapple-server --strict "${preview_args[@]}"
           helm template tapple-preview charts/tapple-server \
@@ -131,12 +131,83 @@ jobs:
             fi
           done
 
+          invalid_preview_databases=(
+            tapple
+            tapple_dev
+            preview_bootstrap
+            tapple_pr
+            tapple_pr_ci
+            tapple_pr42x
+          )
+          for invalid_database in "${invalid_preview_databases[@]}"; do
+            if helm template invalid-preview-database charts/tapple-server \
+              --namespace preview \
+              "${preview_args[@]}" \
+              --set-string "createDatabase.name=$invalid_database" \
+              >/dev/null 2>&1; then
+              echo "unsafe preview database name rendered: $invalid_database" >&2
+              exit 1
+            fi
+          done
+          if helm template invalid-preview-owner charts/tapple-server \
+            --namespace preview \
+            "${preview_args[@]}" \
+            --set-string "createDatabase.owner=postgres" \
+            >/dev/null 2>&1; then
+            echo "unsafe preview database owner rendered" >&2
+            exit 1
+          fi
+
+          valid_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          helm template tapple-digest charts/tapple-server \
+            --namespace app \
+            --set-string "image.digest=$valid_digest" \
+            >"$RUNNER_TEMP/tapple-digest-rendered.yaml"
+          if helm template invalid-digest charts/tapple-server \
+            --set-string "image.digest=sha256:not-a-digest" \
+            >/dev/null 2>&1; then
+            echo "invalid application image digest rendered successfully" >&2
+            exit 1
+          fi
+          if helm template invalid-repository charts/tapple-server \
+            --set-string "image.repository=registry.example.invalid/attacker/app" \
+            >/dev/null 2>&1; then
+            echo "untrusted application image repository rendered successfully" >&2
+            exit 1
+          fi
+
           python - <<'PY'
           import os
           from pathlib import Path
+          import re
           import yaml
 
           runner_temp = Path(os.environ["RUNNER_TEMP"])
+          base_values = yaml.safe_load(
+              Path("charts/tapple-server/values.yaml").read_text()
+          )
+          overrides = {
+              "prod": {},
+              "dev": yaml.safe_load(
+                  Path("charts/tapple-server/values-dev.yaml").read_text()
+              ),
+              "preview": yaml.safe_load(
+                  Path("charts/tapple-server/values-preview.yaml").read_text()
+              ),
+          }
+          expected_usernames = {
+              "prod": "tapple_app",
+              "dev": "tapple_dev_app",
+              "preview": "tapple_preview_app",
+          }
+          public_https_exceptions = [
+              "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10",
+              "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+              "192.0.0.0/24", "192.0.2.0/24", "192.31.196.0/24",
+              "192.52.193.0/24", "192.88.99.0/24", "192.168.0.0/16",
+              "192.175.48.0/24", "198.18.0.0/15", "198.51.100.0/24",
+              "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+          ]
           for environment in ("prod", "dev", "preview"):
               resources = [
                   doc for doc in yaml.safe_load_all(
@@ -145,11 +216,135 @@ jobs:
               ]
               assert not any(doc["kind"] == "Ingress" for doc in resources), environment
               deployment = next(doc for doc in resources if doc["kind"] == "Deployment")
+              pod_template = deployment["spec"]["template"]
+              app_container = pod_template["spec"]["containers"][0]
               explicit_env = {
                   item["name"]: item.get("value")
-                  for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+                  for item in app_container["env"]
               }
               assert explicit_env["OTEL_TRACE_SAMPLE"] == "1.0", environment
+              assert explicit_env["POSTGRES_USERNAME"] == expected_usernames[environment]
+              assert [
+                  item["secretRef"]["name"] for item in app_container["envFrom"]
+              ] == ["app-secrets", "postgres-app"]
+
+              image_values = dict(base_values["image"])
+              image_values.update(overrides[environment].get("image", {}))
+              assert image_values["repository"] == "ghcr.io/tapplee/tapple-be"
+              if environment == "preview":
+                  image_values["tag"] = "ci"
+                  assert overrides[environment]["image"]["digest"] == ""
+              digest = image_values.get("digest", "")
+              if digest:
+                  assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+                  expected_image = f'{image_values["repository"]}@{digest}'
+              else:
+                  expected_image = (
+                      f'{image_values["repository"]}:{image_values["tag"]}'
+                  )
+              assert app_container["image"] == expected_image, environment
+              assert pod_template["metadata"]["annotations"][
+                  "tapple.io/image-tag"
+              ] == image_values["tag"]
+
+              service = next(doc for doc in resources if doc["kind"] == "Service")
+              assert service["spec"]["selector"][
+                  "app.kubernetes.io/component"
+              ] == "server"
+              network_policies = [
+                  doc for doc in resources if doc["kind"] == "NetworkPolicy"
+              ]
+              if environment == "preview":
+                  # 공유 namespace baseline은 preview-postgres Application이 소유한다.
+                  assert network_policies == []
+                  assert pod_template["metadata"]["labels"][
+                      "app.kubernetes.io/component"
+                  ] == "server"
+                  jobs = [doc for doc in resources if doc["kind"] == "Job"]
+                  assert {
+                      job["spec"]["template"]["metadata"]["labels"][
+                          "app.kubernetes.io/component"
+                      ] for job in jobs
+                  } == {"database-bootstrap", "database-cleanup"}
+                  continue
+
+              assert {policy["metadata"]["name"] for policy in network_policies} == {
+                  "tapple-server-allow-required",
+                  "tapple-server-default-deny",
+              }
+              policies = {
+                  policy["metadata"]["name"]: policy
+                  for policy in network_policies
+              }
+              default_deny = policies["tapple-server-default-deny"]
+              assert default_deny["metadata"]["annotations"][
+                  "argocd.argoproj.io/sync-wave"
+              ] == "-1"
+              assert default_deny["spec"] == {
+                  "podSelector": {},
+                  "policyTypes": ["Ingress", "Egress"],
+              }
+              allow = policies["tapple-server-allow-required"]
+              assert allow["metadata"]["annotations"][
+                  "argocd.argoproj.io/sync-wave"
+              ] == "-2"
+              assert allow["spec"]["policyTypes"] == ["Ingress", "Egress"]
+              assert allow["spec"]["podSelector"]["matchExpressions"] == [{
+                  "key": "app.kubernetes.io/component",
+                  "operator": "NotIn",
+                  "values": ["database-bootstrap", "database-cleanup"],
+              }]
+              traefik_peer = allow["spec"]["ingress"][0]["from"][0]
+              assert traefik_peer["namespaceSelector"]["matchLabels"] == {
+                  "kubernetes.io/metadata.name": "kube-system"
+              }
+              assert traefik_peer["podSelector"]["matchLabels"] == {
+                  "app.kubernetes.io/name": "traefik",
+                  "app.kubernetes.io/instance": "traefik-kube-system",
+              }
+              expected_database_namespace = {
+                  "prod": "db", "dev": "dev-db"
+              }[environment]
+              database_rule = next(
+                  rule for rule in allow["spec"]["egress"]
+                  if any(
+                      peer.get("namespaceSelector", {}).get("matchLabels", {}).get(
+                          "kubernetes.io/metadata.name"
+                      ) == expected_database_namespace
+                      for peer in rule.get("to", [])
+                  )
+              )
+              assert database_rule["ports"] == [{
+                  "protocol": "TCP", "port": 5432,
+              }]
+              public_rule = next(
+                  rule for rule in allow["spec"]["egress"]
+                  if any("ipBlock" in peer for peer in rule.get("to", []))
+              )
+              assert public_rule["to"] == [{
+                  "ipBlock": {
+                      "cidr": "0.0.0.0/0",
+                      "except": public_https_exceptions,
+                  }
+              }]
+              assert public_rule["ports"] == [{
+                  "protocol": "TCP", "port": 443,
+              }]
+
+          digest_resources = [
+              doc for doc in yaml.safe_load_all(
+                  (runner_temp / "tapple-digest-rendered.yaml").read_text()
+              ) if doc
+          ]
+          digest_deployment = next(
+              doc for doc in digest_resources if doc["kind"] == "Deployment"
+          )
+          digest_container = digest_deployment["spec"]["template"]["spec"][
+              "containers"
+          ][0]
+          assert digest_container["image"] == (
+              "ghcr.io/tapplee/tapple-be@sha256:" + "a" * 64
+          )
 
           ingress_resources = [
               doc for doc in yaml.safe_load_all(
@@ -192,7 +387,7 @@ jobs:
           stores = [doc for doc in resources if doc.get("kind") == "SecretStore"]
           external_secrets = [doc for doc in resources if doc.get("kind") == "ExternalSecret"]
           assert len(stores) == 10, len(stores)
-          assert len(external_secrets) == 15, len(external_secrets)
+          assert len(external_secrets) == 20, len(external_secrets)
           store_prefixes = {
               (doc["metadata"]["namespace"], doc["metadata"]["name"]):
               doc["spec"]["provider"]["aws"]["prefix"]
@@ -211,7 +406,7 @@ jobs:
           iam_sources = set(
               re.findall(r'secret:(/tapple/[^"\n]+)-\?{6}"', iam_template)
           )
-          assert len(iam_sources) == 13, iam_sources
+          assert len(iam_sources) == 16, iam_sources
           assert sources == iam_sources, {
               "missing_from_iam": sorted(sources - iam_sources),
               "unused_iam_paths": sorted(iam_sources - sources),
@@ -223,11 +418,56 @@ jobs:
           ]
           assert len(app_secrets) == 3
           assert all(
-              "OTEL_TRACE_SAMPLE" not in {
+              not {
+                  "OTEL_TRACE_SAMPLE", "POSTGRES_USERNAME", "POSTGRES_PASSWORD"
+              } & {
                   item["secretKey"] for item in doc["spec"]["data"]
               }
               for doc in app_secrets
           )
+
+          postgres_app_secrets = [
+              doc for doc in external_secrets
+              if doc["metadata"]["name"] == "postgres-app"
+          ]
+          assert {
+              doc["metadata"]["namespace"] for doc in postgres_app_secrets
+          } == {"app", "db", "dev-app", "dev-db", "preview"}
+          assert all(
+              {
+                  item["secretKey"]: item["remoteRef"]["property"]
+                  for item in doc["spec"]["data"]
+              } == {"POSTGRES_PASSWORD": "POSTGRES_PASSWORD"}
+              for doc in postgres_app_secrets
+          )
+          assert {
+              store_prefixes[
+                  (doc["metadata"]["namespace"], doc["spec"]["secretStoreRef"]["name"])
+              ] + doc["spec"]["data"][0]["remoteRef"]["key"]
+              for doc in postgres_app_secrets
+          } == {
+              "/tapple/prod/postgres-app",
+              "/tapple/dev/postgres-app",
+              "/tapple/preview/postgres-app",
+          }
+
+          preview_postgres_credentials = next(
+              doc for doc in external_secrets
+              if doc["metadata"]["namespace"] == "preview"
+              and doc["metadata"]["name"] == "postgres-preview-secrets"
+          )
+          assert {
+              item["secretKey"]: item["remoteRef"]["property"]
+              for item in preview_postgres_credentials["spec"]["data"]
+          } == {
+              "POSTGRES_PASSWORD": "POSTGRES_PASSWORD",
+              "POSTGRES_USER": "POSTGRES_USER",
+          }
+          with Path("apps/platform/secrets.yaml").open(encoding="utf-8") as stream:
+              secrets_application = yaml.safe_load(stream)
+          assert secrets_application["kind"] == "Application"
+          assert secrets_application["metadata"]["name"] == "secrets"
+          assert secrets_application["spec"]["source"]["path"] == "charts/tapple-secrets"
 
           backup_s3 = next(
               doc
@@ -463,7 +703,10 @@ jobs:
               container["name"]: container["image"]
               for container in deployment["spec"]["template"]["spec"]["containers"]
           }
-          assert images["grafana"] == "docker.io/grafana/grafana:13.2.0-distroless"
+          assert images["grafana"] == (
+              "docker.io/grafana/grafana:13.2.0-distroless@sha256:"
+              "08e6ab6d67a5e21e6540724d3673a572840a43b1ba02d03922d0a21a7dbb38f9"
+          )
           containers = {
               container["name"]: container
               for container in deployment["spec"]["template"]["spec"]["containers"]
@@ -784,7 +1027,7 @@ jobs:
                           flags=re.MULTILINE,
                       )
                   )
-          assert len(postgres_references) == 7, postgres_references
+          assert len(postgres_references) == 10, postgres_references
           assert set(postgres_references) == {postgres_image}, postgres_references
 
           for statefulset_path in (
@@ -800,20 +1043,231 @@ jobs:
               }
               assert statefulset_volumes["tmp"]["emptyDir"]["sizeLimit"] == "256Mi"
               assert statefulset_volumes["run"]["emptyDir"]["sizeLimit"] == "64Mi"
+              postgres_container = statefulset["spec"]["template"]["spec"][
+                  "containers"
+              ][0]
+              for probe_name in (
+                  "startupProbe", "readinessProbe", "livenessProbe"
+              ):
+                  probe = postgres_container[probe_name]
+                  command = probe["exec"]["command"]
+                  assert command[:2] == ["sh", "-ec"]
+                  assert "$(POSTGRES_" not in command[2]
+                  assert "$POSTGRES_USER" in command[2]
+                  assert "$POSTGRES_DB" in command[2]
+                  assert probe["timeoutSeconds"] == 3
+              assert postgres_container["startupProbe"]["failureThreshold"] == 60
 
-          namespace_documents = []
-          for namespace_path in (
-              "manifests/cluster/namespaces.yaml",
-              "manifests/cluster/team-access.yaml",
-          ):
-              with Path(namespace_path).open(encoding="utf-8") as stream:
-                  namespace_documents.extend(
-                      doc for doc in yaml.safe_load_all(stream)
-                      if doc and doc.get("kind") == "Namespace"
-                  )
+          role_jobs = {
+              "manifests/postgres/app-role-job.yaml": (
+                  "db", "prod", "tapple_app", "postgres-secrets"
+              ),
+              "manifests/postgres-dev/app-role-job.yaml": (
+                  "dev-db", "dev", "tapple_dev_app", "postgres-secrets"
+              ),
+              "manifests/postgres-preview/app-role-job.yaml": (
+                  "preview", "preview", "tapple_preview_app",
+                  "postgres-preview-secrets",
+              ),
+          }
+          for role_job_path, contract in role_jobs.items():
+              namespace, environment, role_name, admin_secret = contract
+              with Path(role_job_path).open(encoding="utf-8") as stream:
+                  role_job = yaml.safe_load(stream)
+              assert role_job["metadata"]["namespace"] == namespace
+              assert role_job["metadata"]["labels"]["environment"] == environment
+              assert role_job["metadata"]["annotations"][
+                  "argocd.argoproj.io/sync-options"
+              ] == "Force=true,Replace=true"
+              assert role_job["spec"]["activeDeadlineSeconds"] == 300
+              assert role_job["spec"]["backoffLimit"] == 3
+              role_pod = role_job["spec"]["template"]["spec"]
+              assert role_pod["automountServiceAccountToken"] is False
+              assert role_pod["securityContext"]["runAsNonRoot"] is True
+              assert role_pod["securityContext"]["seccompProfile"] == {
+                  "type": "RuntimeDefault"
+              }
+              role_container = role_pod["containers"][0]
+              assert role_container["image"] == postgres_image
+              assert role_container["securityContext"] == {
+                  "allowPrivilegeEscalation": False,
+                  "readOnlyRootFilesystem": True,
+                  "capabilities": {"drop": ["ALL"]},
+              }
+              role_env = {
+                  item["name"]: item for item in role_container["env"]
+              }
+              assert role_env["APP_PASSWORD"]["valueFrom"]["secretKeyRef"] == {
+                  "name": "postgres-app", "key": "POSTGRES_PASSWORD",
+              }
+              for variable, key in (
+                  ("PGUSER", "POSTGRES_USER"),
+                  ("PGPASSWORD", "POSTGRES_PASSWORD"),
+              ):
+                  assert role_env[variable]["valueFrom"]["secretKeyRef"] == {
+                      "name": admin_secret, "key": key,
+                  }
+              role_script = role_container["args"][0]
+              assert f"CREATE ROLE {role_name} LOGIN" in role_script
+              assert f"ALTER ROLE {role_name} NOSUPERUSER NOCREATEDB" in role_script
+              assert "NOCREATEROLE NOINHERIT NOREPLICATION" in role_script
+              assert "NOBYPASSRLS" in role_script
+              assert "pg_auth_members" in role_script
+              subprocess.run(
+                  ["sh", "-n"], input=role_script, text=True, check=True
+              )
+
+          with Path("manifests/postgres/readonly-role-job.yaml").open(
+              encoding="utf-8"
+          ) as stream:
+              readonly_job = yaml.safe_load(stream)
+          assert readonly_job["spec"]["activeDeadlineSeconds"] == 300
+          readonly_script = readonly_job["spec"]["template"]["spec"][
+              "containers"
+          ][0]["args"][0]
+          assert "ALTER ROLE tapple_ro NOSUPERUSER NOCREATEDB" in readonly_script
+          assert "NOCREATEROLE NOINHERIT NOREPLICATION" in readonly_script
+          assert "NOBYPASSRLS" in readonly_script
+          assert "pg_auth_members" in readonly_script
+          assert "ALTER DEFAULT PRIVILEGES FOR ROLE tapple_app" in readonly_script
+
+          network_contracts = {
+              "db": (
+                  "manifests/postgres/networkpolicy.yaml",
+                  "manifests/postgres/default-deny-networkpolicy.yaml",
+                  5,
+              ),
+              "dev-db": (
+                  "manifests/postgres-dev/networkpolicy.yaml",
+                  "manifests/postgres-dev/default-deny-networkpolicy.yaml",
+                  4,
+              ),
+              "preview": (
+                  "manifests/postgres-preview/networkpolicy.yaml",
+                  "manifests/postgres-preview/default-deny-networkpolicy.yaml",
+                  5,
+              ),
+          }
+          raw_network_policies = {}
+          for namespace, contract in network_contracts.items():
+              allow_path, deny_path, expected_count = contract
+              policies = []
+              for policy_path in (allow_path, deny_path):
+                  with Path(policy_path).open(encoding="utf-8") as stream:
+                      policies.extend(
+                          document for document in yaml.safe_load_all(stream)
+                          if document
+                      )
+              assert len(policies) == expected_count, (namespace, len(policies))
+              assert all(policy["kind"] == "NetworkPolicy" for policy in policies)
+              assert all(
+                  policy["metadata"]["namespace"] == namespace
+                  for policy in policies
+              )
+              default_deny = next(
+                  policy for policy in policies
+                  if policy["metadata"]["name"] == "default-deny"
+              )
+              assert default_deny["metadata"]["annotations"][
+                  "argocd.argoproj.io/sync-wave"
+              ] == "-1"
+              assert default_deny["spec"] == {
+                  "podSelector": {},
+                  "policyTypes": ["Ingress", "Egress"],
+              }
+              allow_policies = [
+                  policy for policy in policies if policy is not default_deny
+              ]
+              assert all(
+                  policy["metadata"]["annotations"][
+                      "argocd.argoproj.io/sync-wave"
+                  ] == "-2"
+                  for policy in allow_policies
+              )
+              rendered_policy_text = "\n".join(
+                  yaml.safe_dump(policy) for policy in policies
+              )
+              assert "team-access" not in rendered_policy_text
+              raw_network_policies[namespace] = {
+                  policy["metadata"]["name"]: policy for policy in policies
+              }
+
+          prod_backup_policy = raw_network_policies["db"][
+              "pg-backup-allow-required-egress"
+          ]
+          public_rules = [
+              rule for rule in prod_backup_policy["spec"]["egress"]
+              if any("ipBlock" in peer for peer in rule.get("to", []))
+          ]
+          assert len(public_rules) == 1
+          assert public_rules[0]["ports"] == [{"protocol": "TCP", "port": 443}]
+          public_block = public_rules[0]["to"][0]["ipBlock"]
+          assert public_block["cidr"] == "0.0.0.0/0"
+          assert {
+              "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+              "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+          } <= set(public_block["except"])
+          assert not any(
+              "ipBlock" in peer
+              for policy in raw_network_policies["dev-db"].values()
+              for rule in policy["spec"].get("egress", [])
+              for peer in rule.get("to", [])
+          )
+          preview_public_rules = [
+              rule
+              for policy in raw_network_policies["preview"].values()
+              for rule in policy["spec"].get("egress", [])
+              if any("ipBlock" in peer for peer in rule.get("to", []))
+          ]
+          assert len(preview_public_rules) == 1
+          assert preview_public_rules[0]["ports"] == [
+              {"protocol": "TCP", "port": 443}
+          ]
+          preview_public_block = preview_public_rules[0]["to"][0]["ipBlock"]
+          assert preview_public_block["cidr"] == "0.0.0.0/0"
+          assert set(preview_public_block["except"]) == set(
+              public_block["except"]
+          )
+
+          preview_ingress = raw_network_policies["preview"][
+              "postgres-preview-allow-required-ingress"
+          ]
+          preview_peers = preview_ingress["spec"]["ingress"][0]["from"]
+          app_peer = next(
+              peer for peer in preview_peers
+              if peer["podSelector"].get("matchLabels", {}).get(
+                  "app.kubernetes.io/name"
+              ) == "tapple-server"
+          )
+          assert app_peer["podSelector"]["matchExpressions"] == [{
+              "key": "app.kubernetes.io/component",
+              "operator": "NotIn",
+              "values": ["database-bootstrap", "database-cleanup"],
+          }]
+          preview_job_components = {
+              peer["podSelector"].get("matchLabels", {}).get(
+                  "app.kubernetes.io/component"
+              )
+              for peer in preview_peers
+              if peer is not app_peer
+          }
+          assert preview_job_components == {
+              "database-bootstrap", "database-cleanup",
+          }
+
+          with Path("manifests/cluster/namespaces.yaml").open(
+              encoding="utf-8"
+          ) as stream:
+              namespace_documents = [
+                  doc for doc in yaml.safe_load_all(stream)
+                  if doc and doc.get("kind") == "Namespace"
+              ]
           assert {doc["metadata"]["name"] for doc in namespace_documents} == {
               "app", "db", "dev-app", "dev-db", "preview", "monitoring",
-              "external-secrets", "team-access",
+              "external-secrets",
+          }
+          enforced_namespaces = {
+              "app", "db", "dev-app", "dev-db", "preview", "external-secrets",
           }
           for namespace in namespace_documents:
               labels = namespace["metadata"]["labels"]
@@ -821,10 +1275,14 @@ jobs:
               assert labels["pod-security.kubernetes.io/audit-version"] == "v1.36"
               assert labels["pod-security.kubernetes.io/warn"] == "restricted"
               assert labels["pod-security.kubernetes.io/warn-version"] == "v1.36"
-              assert not any(
-                  key.startswith("pod-security.kubernetes.io/enforce")
-                  for key in labels
-              )
+              if namespace["metadata"]["name"] in enforced_namespaces:
+                  assert labels["pod-security.kubernetes.io/enforce"] == "restricted"
+                  assert labels["pod-security.kubernetes.io/enforce-version"] == "v1.36"
+              else:
+                  assert not any(
+                      key.startswith("pod-security.kubernetes.io/enforce")
+                      for key in labels
+                  )
 
           with Path("ansible/roles/common/defaults/main.yml").open(
               encoding="utf-8"
@@ -876,10 +1334,44 @@ jobs:
               assert label in argocd_tasks
           assert "pod-security.kubernetes.io/enforce" not in argocd_tasks
 
+          parsed_argocd_tasks = yaml.safe_load(argocd_tasks)
+          argocd_task_names = [task["name"] for task in parsed_argocd_tasks]
+          install_index = argocd_task_names.index(
+              "Reconcile Argo CD when the pinned manifest differs"
+          )
+          projects_index = argocd_task_names.index(
+              "Reconcile the AppProjects before the root Application"
+          )
+          assert install_index < projects_index
+          project_apply = parsed_argocd_tasks[projects_index][
+              "ansible.builtin.command"
+          ]
+          assert "--server-side=true" in project_apply["argv"]
+          assert "--field-manager=tapple-ansible-argocd-projects" in (
+              project_apply["argv"]
+          )
+          assert "argocd_projects_manifest_path" in project_apply["stdin"]
+
+          with Path("ansible/roles/argocd/defaults/main.yml").open(
+              encoding="utf-8"
+          ) as stream:
+              argocd_defaults = yaml.safe_load(stream)
+          assert argocd_defaults["argocd_projects_manifest_path"].endswith(
+              "/apps/projects.yaml"
+          )
+
           with Path("manifests/cluster/preview-resourcequota.yaml").open(
               encoding="utf-8"
           ) as stream:
               preview_quota = yaml.safe_load(stream)
+          for removed_legacy_path in (
+              "infra/node-bootstrap.sh",
+              "infra/k3s-setup.sh",
+              "manifests/postgres-preview/orphan-cleanup-cronjob.yaml",
+              "manifests/cluster/team-access.yaml",
+              "scripts/gen-team-kubeconfig.sh",
+          ):
+              assert not Path(removed_legacy_path).exists(), removed_legacy_path
           assert preview_quota["spec"]["hard"] == {
               "count/deployments.apps": "6",
               "requests.cpu": "1800m",
@@ -899,50 +1391,121 @@ jobs:
               if document["kind"] == "Deployment"
           ]
           createdb_jobs = [
-              document for document in rendered_preview if document["kind"] == "Job"
+              document for document in rendered_preview
+              if document["kind"] == "Job"
+              and document["metadata"]["name"].endswith("-createdb")
+          ]
+          dropdb_jobs = [
+              document for document in rendered_preview
+              if document["kind"] == "Job"
+              and document["metadata"]["annotations"].get(
+                  "argocd.argoproj.io/hook"
+              ) == "PostDelete"
           ]
           assert len(preview_deployments) == 1, len(preview_deployments)
           assert len(createdb_jobs) == 1, len(createdb_jobs)
+          assert len(dropdb_jobs) == 1, len(dropdb_jobs)
           preview_deployment = preview_deployments[0]
           createdb_job = createdb_jobs[0]
+          dropdb_job = dropdb_jobs[0]
           assert preview_deployment["spec"]["replicas"] == 1
+          createdb_container = createdb_job["spec"]["template"]["spec"][
+              "containers"
+          ][0]
+          createdb_env = {
+              item["name"]: item for item in createdb_container["env"]
+          }
+          assert createdb_env["TARGET_DB"]["value"] == "tapple_pr42"
+          assert createdb_env["TARGET_OWNER"]["value"] == "tapple_preview_app"
+          assert "CREATE DATABASE %I OWNER %I" in createdb_container["args"][0]
+          assert dropdb_job["metadata"]["annotations"] == {
+              "argocd.argoproj.io/hook": "PostDelete",
+              "argocd.argoproj.io/hook-delete-policy": (
+                  "HookSucceeded,BeforeHookCreation"
+              ),
+          }
+          assert dropdb_job["spec"]["activeDeadlineSeconds"] == 120
+          assert dropdb_job["spec"]["backoffLimit"] == 1
+          dropdb_pod = dropdb_job["spec"]["template"]["spec"]
+          assert dropdb_pod["automountServiceAccountToken"] is False
+          assert dropdb_pod["restartPolicy"] == "Never"
+          assert dropdb_pod["securityContext"] == {
+              "runAsNonRoot": True,
+              "runAsUser": 999,
+              "runAsGroup": 999,
+              "seccompProfile": {"type": "RuntimeDefault"},
+          }
+          dropdb_container = dropdb_pod["containers"][0]
+          assert dropdb_container["securityContext"] == {
+              "allowPrivilegeEscalation": False,
+              "readOnlyRootFilesystem": True,
+              "capabilities": {"drop": ["ALL"]},
+          }
+          dropdb_env = {
+              item["name"]: item for item in dropdb_container["env"]
+          }
+          assert dropdb_env["TARGET_DB"]["value"] == "tapple_pr42"
+          assert dropdb_env["PGDATABASE"]["value"] == "preview_bootstrap"
+          assert dropdb_env["PGOPTIONS"]["value"] == (
+              "-c statement_timeout=30s -c lock_timeout=5s"
+          )
+          for variable, key in (
+              ("PGUSER", "POSTGRES_USER"),
+              ("PGPASSWORD", "POSTGRES_PASSWORD"),
+          ):
+              assert dropdb_env[variable]["valueFrom"]["secretKeyRef"] == {
+                  "name": "postgres-preview-secrets", "key": key,
+              }
+          dropdb_script = dropdb_container["args"][0]
+          assert "tapple_pr[0-9]*" in dropdb_script
+          assert 'DROP DATABASE IF EXISTS :"db"' in dropdb_script
+          assert "WITH (FORCE)" not in dropdb_script
           with Path("manifests/postgres-preview/statefulset.yaml").open(
               encoding="utf-8"
           ) as stream:
               preview_postgres = yaml.safe_load(stream)
-          with Path("manifests/postgres-preview/orphan-cleanup-cronjob.yaml").open(
+          with Path("manifests/postgres-preview/app-role-job.yaml").open(
               encoding="utf-8"
           ) as stream:
-              preview_cleanup = yaml.safe_load(stream)
+              preview_role_job = yaml.safe_load(stream)
 
           deployment_limit = int(
               preview_quota["spec"]["hard"]["count/deployments.apps"]
           )
-          budgets = [
-              pod_budget(preview_deployment["spec"]["template"]["spec"]),
-              pod_budget(createdb_job["spec"]["template"]["spec"]),
-          ]
-          total_cpu = deployment_limit * (budgets[0][0] + budgets[1][0])
-          total_memory = deployment_limit * (budgets[0][1] + budgets[1][1])
-          total_memory_limit = deployment_limit * (budgets[0][2] + budgets[1][2])
-          for pod_spec in (
-              preview_postgres["spec"]["template"]["spec"],
-              preview_cleanup["spec"]["jobTemplate"]["spec"]["template"]["spec"],
-          ):
-              cpu, memory, memory_limit = pod_budget(pod_spec)
-              total_cpu += cpu
-              total_memory += memory
-              total_memory_limit += memory_limit
+          app_budget = pod_budget(preview_deployment["spec"]["template"]["spec"])
+          createdb_budget = pod_budget(createdb_job["spec"]["template"]["spec"])
+          dropdb_budget = pod_budget(dropdb_pod)
+          postgres_budget = pod_budget(preview_postgres["spec"]["template"]["spec"])
+          role_budget = pod_budget(
+              preview_role_job["spec"]["template"]["spec"]
+          )
+          normal_totals = tuple(
+              deployment_limit * (app_budget[index] + createdb_budget[index])
+              + postgres_budget[index] + role_budget[index]
+              for index in range(3)
+          )
+          deletion_totals = tuple(
+              deployment_limit * dropdb_budget[index]
+              + postgres_budget[index] + role_budget[index]
+              for index in range(3)
+          )
 
           hard = preview_quota["spec"]["hard"]
-          assert total_cpu <= cpu_millicores(hard["requests.cpu"])
-          assert total_memory <= memory_mebibytes(hard["requests.memory"])
-          assert total_memory_limit <= memory_mebibytes(hard["limits.memory"])
-          print(
-              "preview quota usage: "
-              f"deployments={deployment_limit} cpu={total_cpu}m "
-              f"memory={total_memory}Mi memory-limit={total_memory_limit}Mi"
-          )
+          for phase, totals in (
+              ("normal", normal_totals),
+              ("deletion", deletion_totals),
+          ):
+              total_cpu, total_memory, total_memory_limit = totals
+              assert total_cpu <= cpu_millicores(hard["requests.cpu"]), phase
+              assert total_memory <= memory_mebibytes(hard["requests.memory"]), phase
+              assert total_memory_limit <= memory_mebibytes(
+                  hard["limits.memory"]
+              ), phase
+              print(
+                  f"preview quota usage ({phase}): "
+                  f"deployments={deployment_limit} cpu={total_cpu}m "
+                  f"memory={total_memory}Mi memory-limit={total_memory_limit}Mi"
+              )
 
           with Path("ansible/roles/common/tasks/main.yml").open(
               encoding="utf-8"
@@ -985,11 +1548,164 @@ jobs:
           from pathlib import Path
           import json
           import os
+          import re
           import subprocess
           import yaml
 
           root = Path.cwd()
           output = Path(os.environ["VALIDATION_DIR"])
+          project_documents = [
+              document
+              for document in yaml.safe_load_all(
+                  (root / "apps/projects.yaml").read_text(encoding="utf-8")
+              )
+              if document
+          ]
+          assert [
+              document["metadata"]["name"] for document in project_documents
+          ] == [
+              "bootstrap", "platform", "external-secrets", "monitoring",
+              "prod", "dev", "preview", "default",
+          ]
+          project_waves = {
+              document["metadata"]["name"]: int(
+                  document["metadata"]["annotations"][
+                      "argocd.argoproj.io/sync-wave"
+                  ]
+              )
+              for document in project_documents
+          }
+          assert set(project_waves.values()) == {-100, -99}
+          assert project_waves["default"] == -99
+          assert all(
+              wave == -100
+              for name, wave in project_waves.items()
+              if name != "default"
+          )
+          projects = {
+              document["metadata"]["name"]: document["spec"]
+              for document in project_documents
+          }
+          repository = "https://github.com/Tapplee/tapple-infra-v2.git"
+          in_cluster = "https://kubernetes.default.svc"
+          expected_sources = {
+              "bootstrap": {repository},
+              "platform": {repository},
+              "external-secrets": {"https://charts.external-secrets.io"},
+              "monitoring": {
+                  repository,
+                  "https://grafana-community.github.io/helm-charts",
+                  "https://grafana.github.io/helm-charts",
+                  "https://open-telemetry.github.io/opentelemetry-helm-charts",
+                  "https://prometheus-community.github.io/helm-charts",
+              },
+              "prod": {repository},
+              "dev": {repository},
+              "preview": {repository},
+          }
+          expected_destinations = {
+              "bootstrap": {(in_cluster, "argocd")},
+              "platform": {
+                  (in_cluster, namespace)
+                  for namespace in {
+                      "app", "argocd", "db", "default", "dev-app", "dev-db",
+                      "external-secrets", "monitoring", "preview",
+                  }
+              },
+              "external-secrets": {(in_cluster, "external-secrets")},
+              "monitoring": {(in_cluster, "monitoring")},
+              "prod": {(in_cluster, "app"), (in_cluster, "db")},
+              "dev": {(in_cluster, "dev-app"), (in_cluster, "dev-db")},
+              "preview": {(in_cluster, "preview")},
+          }
+          for project_name in expected_sources:
+              project = projects[project_name]
+              assert set(project["sourceRepos"]) == expected_sources[project_name]
+              assert {
+                  (destination["server"], destination["namespace"])
+                  for destination in project["destinations"]
+              } == expected_destinations[project_name]
+          assert projects["default"]["sourceRepos"] == []
+          assert projects["default"]["sourceNamespaces"] == []
+          assert projects["default"]["destinations"] == []
+          assert projects["default"]["namespaceResourceBlacklist"] == [{
+              "group": "*", "kind": "*",
+          }]
+          assert {
+              (resource["group"], resource["kind"])
+              for resource in projects["bootstrap"]["namespaceResourceWhitelist"]
+          } == {
+              ("argoproj.io", "Application"),
+              ("argoproj.io", "ApplicationSet"),
+              ("argoproj.io", "AppProject"),
+          }
+          for project_name in (
+              "bootstrap", "monitoring", "prod", "dev", "preview"
+          ):
+              assert projects[project_name]["clusterResourceWhitelist"] == []
+
+          expected_assignments = {
+              "apps/dev/postgres.yaml": "dev",
+              "apps/dev/tapple-server.yaml": "dev",
+              "apps/platform/cluster.yaml": "platform",
+              "apps/platform/external-secrets.yaml": "external-secrets",
+              "apps/platform/monitoring/grafana.yaml": "monitoring",
+              "apps/platform/monitoring/loki.yaml": "monitoring",
+              "apps/platform/monitoring/monitoring-config.yaml": "monitoring",
+              "apps/platform/monitoring/otel-collector.yaml": "monitoring",
+              "apps/platform/monitoring/prometheus.yaml": "monitoring",
+              "apps/platform/monitoring/tempo.yaml": "monitoring",
+              "apps/platform/secrets.yaml": "platform",
+              "apps/preview/applicationset.yaml": "preview",
+              "apps/preview/postgres.yaml": "preview",
+              "apps/prod/postgres.yaml": "prod",
+              "apps/prod/tapple-server.yaml": "prod",
+              "bootstrap/root-app.yaml": "bootstrap",
+          }
+          actual_application_paths = {
+              str(path.relative_to(root))
+              for search_root in (root / "apps", root / "bootstrap")
+              for path in search_root.rglob("*.yaml")
+              if path != root / "apps/projects.yaml"
+              and any(
+                  document and document.get("kind") in {"Application", "ApplicationSet"}
+                  for document in yaml.safe_load_all(path.read_text(encoding="utf-8"))
+              )
+          }
+          assert actual_application_paths == set(expected_assignments), {
+              "missing_contract": sorted(
+                  actual_application_paths - set(expected_assignments)
+              ),
+              "stale_contract": sorted(
+                  set(expected_assignments) - actual_application_paths
+              ),
+          }
+          child_waves = []
+          for application_path, expected_project in expected_assignments.items():
+              application = yaml.safe_load(
+                  (root / application_path).read_text(encoding="utf-8")
+              )
+              if application_path.startswith("apps/"):
+                  child_waves.append(int(
+                      application.get("metadata", {}).get("annotations", {}).get(
+                          "argocd.argoproj.io/sync-wave", "0"
+                      )
+                  ))
+              application_spec = application["spec"]
+              if application["kind"] == "ApplicationSet":
+                  application_spec = application_spec["template"]["spec"]
+              assert application_spec["project"] == expected_project, application_path
+              assert "CreateNamespace=true" not in application_spec.get(
+                  "syncPolicy", {}
+              ).get("syncOptions", []), application_path
+              source = application_spec["source"]
+              assert source["repoURL"] in projects[expected_project]["sourceRepos"]
+              destination = application_spec["destination"]
+              assert (
+                  destination["server"], destination["namespace"]
+              ) in expected_destinations[expected_project]
+          assert max(project_waves.values()) < min(child_waves)
+
           applications = {
               "apps/platform/external-secrets.yaml": "https://charts.external-secrets.io",
               "apps/platform/monitoring/prometheus.yaml": "https://prometheus-community.github.io/helm-charts",
@@ -1051,6 +1767,98 @@ jobs:
                   if document
               ]
 
+          secrets_render = subprocess.run(
+              [
+                  "helm", "template", "tapple-secrets", "charts/tapple-secrets",
+                  "--namespace", "external-secrets",
+                  "--kube-version", "1.36.3",
+                  "--set-string", "aws.accountId=123456789012",
+              ],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+          project_resources = {
+              "platform": [
+                  document
+                  for document in yaml.safe_load_all(secrets_render.stdout)
+                  if document
+              ],
+              "external-secrets": rendered_resources["external-secrets"],
+              "monitoring": [
+                  document
+                  for application, documents in rendered_resources.items()
+                  if application != "external-secrets"
+                  for document in documents
+              ],
+          }
+          for project_name, manifest_root in (
+              ("platform", root / "manifests/cluster"),
+              ("monitoring", root / "manifests/monitoring"),
+          ):
+              for manifest_path in manifest_root.rglob("*.yaml"):
+                  project_resources[project_name].extend(
+                      document
+                      for document in yaml.safe_load_all(
+                          manifest_path.read_text(encoding="utf-8")
+                      )
+                      if document
+                  )
+
+          def group_kind(document):
+              api_version = document["apiVersion"]
+              group = api_version.split("/", 1)[0] if "/" in api_version else ""
+              return group, document["kind"]
+
+          for project_name, resources in project_resources.items():
+              rendered_namespaces = {
+                  document["metadata"]["namespace"]
+                  for document in resources
+                  if document.get("metadata", {}).get("namespace")
+              }
+              rendered_namespaces.update(
+                  yaml.safe_load(
+                      (root / application_path).read_text(encoding="utf-8")
+                  )["spec"]["destination"]["namespace"]
+                  for application_path, assigned_project
+                  in expected_assignments.items()
+                  if assigned_project == project_name
+              )
+              configured_namespaces = {
+                  destination["namespace"]
+                  for destination in projects[project_name]["destinations"]
+              }
+              assert configured_namespaces == rendered_namespaces, {
+                  "project": project_name,
+                  "missing_destinations": sorted(
+                      rendered_namespaces - configured_namespaces
+                  ),
+                  "unused_destinations": sorted(
+                      configured_namespaces - rendered_namespaces
+                  ),
+              }
+
+              rendered_cluster_resources = {
+                  group_kind(document)
+                  for document in resources
+                  if not document.get("metadata", {}).get("namespace")
+              }
+              project_cluster_resources = {
+                  (resource["group"], resource["kind"])
+                  for resource in projects[project_name][
+                      "clusterResourceWhitelist"
+                  ]
+              }
+              assert project_cluster_resources == rendered_cluster_resources, {
+                  "project": project_name,
+                  "missing_cluster_permissions": sorted(
+                      rendered_cluster_resources - project_cluster_resources
+                  ),
+                  "unused_cluster_permissions": sorted(
+                      project_cluster_resources - rendered_cluster_resources
+                  ),
+              }
+
           def resource(application, kind, name):
               return next(
                   document
@@ -1086,6 +1894,9 @@ jobs:
                       pod_spec = workload["spec"]["template"]["spec"]
                   for section in ("initContainers", "containers"):
                       for item in pod_spec.get(section, []):
+                          assert re.fullmatch(
+                              r"[^@\s]+@sha256:[0-9a-f]{64}", item["image"]
+                          ), (application, item["name"], item["image"])
                           resources = item.get("resources", {})
                           requests = resources.get("requests", {})
                           limits = resources.get("limits", {})
@@ -1203,13 +2014,22 @@ jobs:
               "requests": {"cpu": "20m", "memory": "64Mi"},
           }
           assert not any(
-              document["kind"] in {"ClusterRole", "ClusterRoleBinding"}
+              document["kind"] in {
+                  "ClusterRole", "ClusterRoleBinding", "Role", "RoleBinding"
+              }
               and document["metadata"]["name"] == "prometheus-kube-state-metrics"
               for document in rendered_resources["prometheus"]
           )
-          kube_state_role = resource(
-              "prometheus", "Role", "prometheus-kube-state-metrics"
-          )
+          with Path(
+              "manifests/postgres/kube-state-metrics-role.yaml"
+          ).open(encoding="utf-8") as stream:
+              kube_state_rbac = {
+                  document["kind"]: document
+                  for document in yaml.safe_load_all(stream)
+                  if document
+              }
+          assert set(kube_state_rbac) == {"Role", "RoleBinding"}
+          kube_state_role = kube_state_rbac["Role"]
           assert kube_state_role["metadata"]["namespace"] == "db"
           assert kube_state_role["rules"] == [
               {
@@ -1223,9 +2043,7 @@ jobs:
                   "verbs": ["list", "watch"],
               },
           ]
-          kube_state_role_binding = resource(
-              "prometheus", "RoleBinding", "prometheus-kube-state-metrics"
-          )
+          kube_state_role_binding = kube_state_rbac["RoleBinding"]
           assert kube_state_role_binding["metadata"]["namespace"] == "db"
           assert kube_state_role_binding["roleRef"] == {
               "apiGroup": "rbac.authorization.k8s.io",
@@ -1257,6 +2075,13 @@ jobs:
           )
           prometheus_deployment = resource(
               "prometheus", "Deployment", "prometheus-server"
+          )
+          assert prometheus_deployment["spec"]["template"]["spec"][
+              "automountServiceAccountToken"
+          ] is False
+          assert not any(
+              document["kind"] in {"ClusterRole", "ClusterRoleBinding"}
+              for document in rendered_resources["prometheus"]
           )
           assert container(
               prometheus_deployment,
@@ -1488,6 +2313,7 @@ jobs:
           assert skipped_kinds == {
               "Application",
               "ApplicationSet",
+              "AppProject",
               "CustomResourceDefinition",
           }, skipped_kinds
           print(
