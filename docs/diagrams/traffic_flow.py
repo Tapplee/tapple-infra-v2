@@ -13,6 +13,7 @@ KubeDiagrams 의 아키텍처 그림은 "무엇이 있는가"(인벤토리)를 �
 """
 
 from diagrams import Cluster, Diagram, Edge
+from diagrams.aws.storage import S3
 from diagrams.k8s.compute import Cronjob, Deployment, StatefulSet
 from diagrams.k8s.controlplane import API
 from diagrams.k8s.network import Ingress, Service
@@ -62,6 +63,7 @@ def build(theme: dict) -> None:
         public = Users("사용자", **dark_panel)
         edge = Internet("Cloudflare edge\nproxied DNS · TLS", **dark_wide_panel)
         outside = Internet("외부 uptime monitor\nHTTPS + heartbeat", **dark_wide_panel)
+        backup_store = S3("전용 AWS S3 backup\nSSE-S3 · versioning · 35d\nwriter: put only", **dark_wide_panel)
         team = Users("팀원", **dark_panel)
 
         with Cluster("ns kube-system", graph_attr=ca):
@@ -75,7 +77,7 @@ def build(theme: dict) -> None:
 
         with Cluster("ns db  ·  prod", graph_attr=ca):
             pg = StatefulSet("postgres 16.15 digest\nDB tapple")
-            backup = Cronjob("pg-backup\n03:00 Asia/Seoul\ndeadline 1h · suspend:true")
+            backup = Cronjob("pg-backup\n03:00 Asia/Seoul\nstart deadline 1h · runtime ≤2h\nsuspend:true")
 
         with Cluster("ns dev-app  ·  dev", graph_attr=ca):
             ing_d = Ingress("기본 비활성 Ingress\n실제 host + TLS 후 enable")
@@ -86,8 +88,8 @@ def build(theme: dict) -> None:
 
         with Cluster("ns monitoring  ·  default-deny ingress", graph_attr=ca):
             graf_ing = Ingress("grafana-k3s.<domain>")
-            collector = Prometheus("otel-collector :4317/4318\n512Mi cap · limiter\ntraces 10%")
-            tempo = Tempo("tempo\n7d · PVC 5Gi · 768Mi cap")
+            collector = Prometheus("otel-collector :4317/4318\n1Gi cap · limiter\ntraces 100%")
+            tempo = Tempo("tempo\n7d · PVC 50Gi · 2Gi cap")
             loki = Loki("loki")
             prom = Prometheus("prometheus + alertmanager\n실제 scrape target만\n같은-node 소실은 감지 못함")
             graf = Grafana("grafana")
@@ -104,6 +106,10 @@ def build(theme: dict) -> None:
         traefik >> Edge(color=DATA, style="dashed") >> ing_d >> Edge(color=DATA, style="dashed") >> app_d
         app_d >> Edge(color=DATA, fontcolor=DATA, style="dashed",
                       label="jdbc  postgres.dev-db.svc") >> pg_d
+
+        # restore 리허설을 통과한 뒤에만 suspend를 해제하는 운영 backup 경로.
+        backup >> Edge(color=OPS, fontcolor=OPS, style="dashed",
+                       label="restore gate 후\npg_dump + sha256") >> backup_store
 
         # 관측 — 앱이 밀어 넣는다 (scrape 아님)
         app >> Edge(color=TELEM, fontcolor=TELEM,

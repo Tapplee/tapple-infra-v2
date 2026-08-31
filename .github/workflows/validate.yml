@@ -144,6 +144,12 @@ jobs:
                   ) if doc
               ]
               assert not any(doc["kind"] == "Ingress" for doc in resources), environment
+              deployment = next(doc for doc in resources if doc["kind"] == "Deployment")
+              explicit_env = {
+                  item["name"]: item.get("value")
+                  for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+              }
+              assert explicit_env["OTEL_TRACE_SAMPLE"] == "1.0", environment
 
           ingress_resources = [
               doc for doc in yaml.safe_load_all(
@@ -211,6 +217,35 @@ jobs:
               "unused_iam_paths": sorted(iam_sources - sources),
           }
 
+          app_secrets = [
+              doc for doc in external_secrets
+              if doc["metadata"]["name"] == "app-secrets"
+          ]
+          assert len(app_secrets) == 3
+          assert all(
+              "OTEL_TRACE_SAMPLE" not in {
+                  item["secretKey"] for item in doc["spec"]["data"]
+              }
+              for doc in app_secrets
+          )
+
+          backup_s3 = next(
+              doc
+              for doc in external_secrets
+              if doc["metadata"]["namespace"] == "db"
+              and doc["metadata"]["name"] == "backup-s3"
+          )
+          assert {
+              item["secretKey"]: item["remoteRef"]["property"]
+              for item in backup_s3["spec"]["data"]
+          } == {
+              "AWS_ACCESS_KEY_ID": "AWS_ACCESS_KEY_ID",
+              "AWS_REGION": "AWS_REGION",
+              "AWS_SECRET_ACCESS_KEY": "AWS_SECRET_ACCESS_KEY",
+              "S3_BUCKET": "S3_BUCKET",
+              "S3_EXPECTED_BUCKET_OWNER": "S3_EXPECTED_BUCKET_OWNER",
+          }
+
           origin_tls = next(
               doc
               for doc in external_secrets
@@ -232,6 +267,7 @@ jobs:
 
           rules_file="$RUNNER_TEMP/default-alerts.yml"
           export PROMETHEUS_RULES_FILE="$rules_file"
+          export PROMETHEUS_BACKUP_TEST_FILE="$RUNNER_TEMP/backup-alerts.test.yml"
           python - <<'PY'
           from pathlib import Path
           import os
@@ -253,7 +289,23 @@ jobs:
               if "alert" in rule
           ]
           alert_names = set(alerts)
-          expected = {"NodeExporterDown", "TempoDown"}
+          rules_by_name = {
+              rule["alert"]: rule
+              for group in rules["groups"]
+              for rule in group["rules"]
+              if "alert" in rule
+          }
+          expected = {
+              "NodeExporterDown",
+              "TempoDown",
+              "KubeStateMetricsDown",
+              "OTelCollectorTraceReceiveRefusals",
+              "OTelCollectorTraceEnqueueFailures",
+              "OTelCollectorExporterQueueHigh",
+              "PostgresBackupFailed",
+              "PostgresBackupNeverSucceeded",
+              "PostgresBackupStale",
+          }
           dropped = {
               "ApiServerDown",
               "PrometheusTargetDown",
@@ -268,12 +320,86 @@ jobs:
           assert expected <= alert_names, expected - alert_names
           assert all(alerts.count(name) == 1 for name in expected)
           assert dropped.isdisjoint(alert_names), dropped & alert_names
+          assert "kube_job_failed" in rules_by_name["PostgresBackupFailed"]["expr"]
+          assert 'condition="true"' in rules_by_name["PostgresBackupFailed"]["expr"]
+          never_expr = rules_by_name["PostgresBackupNeverSucceeded"]["expr"]
+          assert "kube_cronjob_spec_suspend" in never_expr
+          assert "unless on (namespace, cronjob)" in never_expr
+          assert rules_by_name["PostgresBackupNeverSucceeded"]["for"] == "27h"
+          stale_expr = rules_by_name["PostgresBackupStale"]["expr"]
+          assert "kube_cronjob_spec_suspend" in stale_expr
+          assert "kube_cronjob_status_last_successful_time" in stale_expr
+          assert "108000" in stale_expr
           Path(os.environ["PROMETHEUS_RULES_FILE"]).write_text(
               rules_text,
               encoding="utf-8",
           )
+          backup_tests = f'''\
+          rule_files:
+            - {os.environ["PROMETHEUS_RULES_FILE"]}
+          evaluation_interval: 5m
+          tests:
+            - name: suspended before activation does not alert
+              interval: 5m
+              input_series:
+                - series: 'kube_cronjob_spec_suspend{{namespace="db",cronjob="pg-backup"}}'
+                  values: '1x375'
+              alert_rule_test:
+                - {{eval_time: 31h15m, alertname: PostgresBackupNeverSucceeded, exp_alerts: []}}
+                - {{eval_time: 31h15m, alertname: PostgresBackupStale, exp_alerts: []}}
+
+            - name: enabled for 27h without a success fires never-succeeded only
+              interval: 5m
+              input_series:
+                - series: 'kube_cronjob_spec_suspend{{namespace="db",cronjob="pg-backup"}}'
+                  values: '1 0x324'
+              alert_rule_test:
+                - {{eval_time: 27h, alertname: PostgresBackupNeverSucceeded, exp_alerts: []}}
+                - eval_time: 27h5m
+                  alertname: PostgresBackupNeverSucceeded
+                  exp_alerts:
+                    - exp_labels: {{namespace: db, cronjob: pg-backup, severity: critical}}
+                      exp_annotations:
+                        summary: "활성화된 PostgreSQL S3 backup의 정규 성공 기록이 없어요"
+                        description: "pg-backup을 활성화한 뒤 27시간 동안 CronJob status에 성공 기록이 없어요. 첫 schedule, controller, Job과 S3 writer 권한을 확인해주세요. 수동 create job은 이 status를 채우지 않아요."
+                - {{eval_time: 27h5m, alertname: PostgresBackupStale, exp_alerts: []}}
+
+            - name: first success clears the never-succeeded timer
+              interval: 5m
+              input_series:
+                - series: 'kube_cronjob_spec_suspend{{namespace="db",cronjob="pg-backup"}}'
+                  values: '1 0x324'
+                - series: 'kube_cronjob_status_last_successful_time{{namespace="db",cronjob="pg-backup"}}'
+                  values: '_x312 93600x13'
+              alert_rule_test:
+                - {{eval_time: 27h5m, alertname: PostgresBackupNeverSucceeded, exp_alerts: []}}
+                - {{eval_time: 27h5m, alertname: PostgresBackupStale, exp_alerts: []}}
+
+            - name: success older than 30h fires stale after its hold
+              interval: 5m
+              input_series:
+                - series: 'kube_cronjob_spec_suspend{{namespace="db",cronjob="pg-backup"}}'
+                  values: '0x375'
+                - series: 'kube_cronjob_status_last_successful_time{{namespace="db",cronjob="pg-backup"}}'
+                  values: '_x12 3600x363'
+              alert_rule_test:
+                - {{eval_time: 31h10m, alertname: PostgresBackupStale, exp_alerts: []}}
+                - eval_time: 31h15m
+                  alertname: PostgresBackupStale
+                  exp_alerts:
+                    - exp_labels: {{namespace: db, cronjob: pg-backup, severity: critical}}
+                      exp_annotations:
+                        summary: "최근 PostgreSQL S3 backup 성공 기록이 없어요"
+                        description: "활성화된 pg-backup의 마지막 정규 성공이 30시간을 넘었어요. CronJob, ExternalSecret과 S3 writer 권한을 확인해주세요."
+                - {{eval_time: 31h15m, alertname: PostgresBackupNeverSucceeded, exp_alerts: []}}
+          '''
+          Path(os.environ["PROMETHEUS_BACKUP_TEST_FILE"]).write_text(
+              backup_tests,
+              encoding="utf-8",
+          )
           PY
           "$PROMTOOL_BIN" check rules "$rules_file"
+          "$PROMTOOL_BIN" test rules "$PROMETHEUS_BACKUP_TEST_FILE"
 
       - name: Render and verify Grafana contract
         shell: bash
@@ -401,6 +527,7 @@ jobs:
           import os
           from pathlib import Path
           import re
+          import subprocess
           import yaml
 
           def cpu_millicores(value):
@@ -443,28 +570,205 @@ jobs:
           assert backup["spec"]["startingDeadlineSeconds"] == 3600
           assert backup["spec"]["suspend"] is True
           assert backup["spec"]["jobTemplate"]["metadata"]["labels"] == {
-              "app.kubernetes.io/name": "pg-backup"
+              "app.kubernetes.io/name": "pg-backup",
+              "app.kubernetes.io/component": "backup",
+              "environment": "prod",
           }
-          pod = backup["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+          job_spec = backup["spec"]["jobTemplate"]["spec"]
+          assert job_spec["activeDeadlineSeconds"] == 7200
+          assert job_spec["ttlSecondsAfterFinished"] == 86400
+          pod = job_spec["template"]["spec"]
           assert pod["securityContext"]["fsGroup"] == 2000
           assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
           dump = next(item for item in pod["initContainers"] if item["name"] == "dump")
           upload = next(item for item in pod["containers"] if item["name"] == "upload")
-          assert dump["securityContext"]["runAsGroup"] != upload["securityContext"]["runAsGroup"]
+          assert dump["securityContext"]["runAsGroup"] == 2000
+          assert upload["securityContext"]["runAsGroup"] == 2000
           dump_script = dump["args"][0]
           assert dump_script.startswith("set -eu\n")
           assert 'test -s "$backup_file"' in dump_script
           assert "sha256sum -c" in dump_script
+          assert "pg_restore --list" in dump_script
+          assert "BACKUP_RUN_ID" in dump_script
           assert upload["args"][0].startswith("set -eu\n")
+          assert upload["image"] == (
+              "public.ecr.aws/aws-cli/aws-cli:2.36.34@sha256:"
+              "cf1f5e5741c33f3fee383296ba8045b96b9eb93c3de017be6688fb00356352d7"
+          )
+          upload_script = upload["args"][0]
+          assert "S3_ENDPOINT" not in upload_script
+          assert "--endpoint-url" not in upload_script
+          # high-level `aws s3 cp`에는 이 옵션이 없어 upload 전에 s3api로 한 번 검증한다.
+          assert upload_script.count("--expected-bucket-owner") == 1
+          assert "None) actual_region=us-east-1" in upload_script
+          assert "EU) actual_region=eu-west-1" in upload_script
+          assert upload_script.count("--checksum-algorithm SHA256") == 3
+          assert upload_script.count("--sse AES256") == 3
+          assert upload_script.index(".complete") > upload_script.index(".sha256")
+          assert not upload.get("envFrom")
+          for script in (dump_script, upload_script):
+              subprocess.run(
+                  ["sh", "-n"], input=script, text=True, check=True
+              )
           for container in (dump, upload):
               backup_mount = next(
                   mount for mount in container["volumeMounts"]
                   if mount["name"] == "backup"
               )
               assert backup_mount["mountPath"] == "/backup"
+              ephemeral = container["resources"]
+              assert "ephemeral-storage" in ephemeral["requests"]
+              assert "ephemeral-storage" in ephemeral["limits"]
+          upload_backup_mount = next(
+              mount for mount in upload["volumeMounts"]
+              if mount["name"] == "backup"
+          )
+          assert upload_backup_mount["readOnly"] is True
           volumes = {item["name"]: item for item in pod["volumes"]}
-          assert volumes["backup"]["emptyDir"]["sizeLimit"] == "5Gi"
+          assert volumes["backup"]["emptyDir"]["sizeLimit"] == "25Gi"
           assert volumes["tmp"]["emptyDir"]["sizeLimit"] == "64Mi"
+          assert volumes["backup-s3"]["secret"] == {
+              "secretName": "backup-s3",
+              "defaultMode": 288,
+          }
+          assert dump["resources"]["requests"]["ephemeral-storage"] == "25Gi"
+          assert dump["resources"]["limits"]["ephemeral-storage"] == "26Gi"
+
+          class CfnLoader(yaml.SafeLoader):
+              pass
+
+          def construct_cfn_tag(loader, tag_suffix, node):
+              if isinstance(node, yaml.ScalarNode):
+                  value = loader.construct_scalar(node)
+              elif isinstance(node, yaml.SequenceNode):
+                  value = loader.construct_sequence(node)
+              else:
+                  value = loader.construct_mapping(node)
+              return {f"!{tag_suffix}": value}
+
+          CfnLoader.add_multi_constructor("!", construct_cfn_tag)
+          with Path("infra/aws/postgres-backup-s3.yaml").open(
+              encoding="utf-8"
+          ) as stream:
+              backup_stack = yaml.load(stream, Loader=CfnLoader)
+          resources = backup_stack["Resources"]
+          assert not any(
+              item["Type"] == "AWS::IAM::AccessKey" for item in resources.values()
+          )
+          bucket = resources["BackupBucket"]
+          assert bucket["DeletionPolicy"] == "Retain"
+          assert bucket["UpdateReplacePolicy"] == "Retain"
+          bucket_properties = bucket["Properties"]
+          assert bucket_properties["VersioningConfiguration"] == {"Status": "Enabled"}
+          assert bucket_properties["OwnershipControls"] == {
+              "Rules": [{"ObjectOwnership": "BucketOwnerEnforced"}]
+          }
+          assert set(bucket_properties["PublicAccessBlockConfiguration"].values()) == {True}
+          assert bucket_properties["BucketEncryption"]["ServerSideEncryptionConfiguration"] == [{
+              "ServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}
+          }]
+          lifecycle = bucket_properties["LifecycleConfiguration"]["Rules"]
+          assert lifecycle == [{
+              "Id": "expire-production-postgres-backups",
+              "Status": "Enabled",
+              "Prefix": "postgres/prod/",
+              "ExpirationInDays": 35,
+              "NoncurrentVersionExpiration": {"NoncurrentDays": 35},
+              "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1},
+          }]
+          bucket_policy = resources["BackupBucketPolicy"]
+          assert bucket_policy["DeletionPolicy"] == "Retain"
+          assert bucket_policy["UpdateReplacePolicy"] == "Retain"
+          writer_properties = resources["BackupWriter"]["Properties"]
+          assert set(writer_properties) == {"UserName", "Policies", "Tags"}
+          assert writer_properties["UserName"] == "tapple-postgres-backup-writer"
+          assert len(writer_properties["Policies"]) == 1
+          assert writer_properties["Policies"][0]["PolicyName"] == (
+              "write-production-postgres-backups"
+          )
+          writer_statements = writer_properties["Policies"][0][
+              "PolicyDocument"
+          ]["Statement"]
+          assert writer_statements == [
+              {
+                  "Sid": "ReadBucketLocation",
+                  "Effect": "Allow",
+                  "Action": "s3:GetBucketLocation",
+                  "Resource": {"!GetAtt": "BackupBucket.Arn"},
+              },
+              {
+                  "Sid": "UploadBackupObjects",
+                  "Effect": "Allow",
+                  "Action": ["s3:PutObject", "s3:AbortMultipartUpload"],
+                  "Resource": {
+                      "!Sub": "${BackupBucket.Arn}/postgres/prod/*"
+                  },
+              },
+          ]
+          writer_actions = {
+              action
+              for statement in writer_statements
+              for action in (
+                  statement["Action"]
+                  if isinstance(statement["Action"], list)
+                  else [statement["Action"]]
+              )
+          }
+          assert writer_actions == {
+              "s3:GetBucketLocation",
+              "s3:PutObject",
+              "s3:AbortMultipartUpload",
+          }
+          policy_statements = {
+              statement["Sid"]: statement
+              for statement in bucket_policy["Properties"][
+                  "PolicyDocument"
+              ]["Statement"]
+          }
+          bucket_arn = {"!GetAtt": "BackupBucket.Arn"}
+          object_arn = {"!Sub": "${BackupBucket.Arn}/*"}
+          backup_object_arn = {
+              "!Sub": "${BackupBucket.Arn}/postgres/prod/*"
+          }
+          assert policy_statements == {
+              "DenyInsecureTransport": {
+                  "Sid": "DenyInsecureTransport",
+                  "Effect": "Deny",
+                  "Principal": "*",
+                  "Action": "s3:*",
+                  "Resource": [bucket_arn, object_arn],
+                  "Condition": {
+                      "Bool": {"aws:SecureTransport": "false"}
+                  },
+              },
+              "DenyMissingServerSideEncryption": {
+                  "Sid": "DenyMissingServerSideEncryption",
+                  "Effect": "Deny",
+                  "Principal": "*",
+                  "Action": "s3:PutObject",
+                  "Resource": backup_object_arn,
+                  "Condition": {
+                      "Null": {
+                          "s3:x-amz-server-side-encryption": "true"
+                      }
+                  },
+              },
+              "DenyWrongServerSideEncryption": {
+                  "Sid": "DenyWrongServerSideEncryption",
+                  "Effect": "Deny",
+                  "Principal": "*",
+                  "Action": "s3:PutObject",
+                  "Resource": backup_object_arn,
+                  "Condition": {
+                      "StringNotEquals": {
+                          "s3:x-amz-server-side-encryption": "AES256"
+                      }
+                  },
+              },
+          }
+          assert backup_stack["Outputs"]["BackupBucketOwnerAccountId"] == {
+              "Value": {"!Ref": "AWS::AccountId"}
+          }
 
           postgres_image = (
               "postgres:16.15-bookworm@sha256:"
@@ -812,6 +1116,24 @@ jobs:
               ("otlp-http", 4318, 4318, "TCP"),
               ("metrics", 8888, 8888, "TCP"),
           }
+          prometheus_config = yaml.safe_load(
+              resource("prometheus", "ConfigMap", "prometheus-server")[
+                  "data"
+              ]["prometheus.yml"]
+          )
+          kube_state_scrapes = [
+              job
+              for job in prometheus_config["scrape_configs"]
+              if job["job_name"] == "kube-state-metrics"
+          ]
+          assert kube_state_scrapes == [{
+              "job_name": "kube-state-metrics",
+              "static_configs": [{
+                  "targets": [
+                      "prometheus-kube-state-metrics.monitoring.svc.cluster.local:8080"
+                  ]
+              }],
+          }]
           otel_configmap = resource(
               "otel-collector", "ConfigMap", "otel-collector"
           )
@@ -821,13 +1143,14 @@ jobs:
               "limit_percentage": 80,
               "spike_limit_percentage": 25,
           }
+          assert set(otel_config["processors"]) == {"memory_limiter", "batch"}
           assert {
               pipeline: config["processors"]
               for pipeline, config in otel_config["service"]["pipelines"].items()
           } == {
               "logs": ["memory_limiter", "batch"],
               "metrics": ["memory_limiter", "batch"],
-              "traces": ["memory_limiter", "probabilistic_sampler", "batch"],
+              "traces": ["memory_limiter", "batch"],
           }
           otel_deployment = resource(
               "otel-collector", "Deployment", "otel-collector"
@@ -839,19 +1162,81 @@ jobs:
               item["name"]: item.get("value")
               for item in otel_container["env"]
           }
-          assert otel_env["GOMEMLIMIT"] == "409MiB"
+          assert otel_env["GOMEMLIMIT"] == "819MiB"
           assert otel_container["resources"] == {
-              "limits": {"memory": "512Mi"},
-              "requests": {"cpu": "100m", "memory": "256Mi"},
+              "limits": {"memory": "1Gi"},
+              "requests": {"cpu": "250m", "memory": "512Mi"},
           }
 
           tempo_statefulset = resource("tempo", "StatefulSet", "tempo")
           tempo_container = container(tempo_statefulset, "tempo")
           assert "-mem-ballast-size-mbs=256" in tempo_container["args"]
           assert tempo_container["resources"] == {
-              "limits": {"memory": "768Mi"},
-              "requests": {"cpu": "100m", "memory": "512Mi"},
+              "limits": {"memory": "2Gi"},
+              "requests": {"cpu": "250m", "memory": "1Gi"},
           }
+          assert tempo_statefulset["spec"]["volumeClaimTemplates"][0]["spec"][
+              "resources"
+          ]["requests"]["storage"] == "50Gi"
+          tempo_config = yaml.safe_load(
+              resource("tempo", "ConfigMap", "tempo")["data"]["tempo.yaml"]
+          )
+          assert tempo_config["compactor"]["compaction"]["block_retention"] == "168h"
+
+          kube_state_metrics = resource(
+              "prometheus", "Deployment", "prometheus-kube-state-metrics"
+          )
+          kube_state_container = container(
+              kube_state_metrics, "kube-state-metrics"
+          )
+          assert kube_state_container["args"] == [
+              "--port=8080",
+              "--resources=cronjobs,jobs",
+              "--namespaces=db",
+          ]
+          assert kube_state_container["image"] == (
+              "registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.14.0@sha256:"
+              "37d841299325c23b56e5951176ce8ef317d537447c0f1b2d2437dddbb1f51165"
+          )
+          assert kube_state_container["resources"] == {
+              "limits": {"memory": "128Mi"},
+              "requests": {"cpu": "20m", "memory": "64Mi"},
+          }
+          assert not any(
+              document["kind"] in {"ClusterRole", "ClusterRoleBinding"}
+              and document["metadata"]["name"] == "prometheus-kube-state-metrics"
+              for document in rendered_resources["prometheus"]
+          )
+          kube_state_role = resource(
+              "prometheus", "Role", "prometheus-kube-state-metrics"
+          )
+          assert kube_state_role["metadata"]["namespace"] == "db"
+          assert kube_state_role["rules"] == [
+              {
+                  "apiGroups": ["batch"],
+                  "resources": ["cronjobs"],
+                  "verbs": ["list", "watch"],
+              },
+              {
+                  "apiGroups": ["batch"],
+                  "resources": ["jobs"],
+                  "verbs": ["list", "watch"],
+              },
+          ]
+          kube_state_role_binding = resource(
+              "prometheus", "RoleBinding", "prometheus-kube-state-metrics"
+          )
+          assert kube_state_role_binding["metadata"]["namespace"] == "db"
+          assert kube_state_role_binding["roleRef"] == {
+              "apiGroup": "rbac.authorization.k8s.io",
+              "kind": "Role",
+              "name": "prometheus-kube-state-metrics",
+          }
+          assert kube_state_role_binding["subjects"] == [{
+              "kind": "ServiceAccount",
+              "name": "prometheus-kube-state-metrics",
+              "namespace": "monitoring",
+          }]
 
           grafana_deployment = resource("grafana", "Deployment", "grafana")
           assert container(
@@ -1107,7 +1492,7 @@ jobs:
           PY
 
       - name: Lint CloudFormation
-        run: cfn-lint infra/aws/external-secrets-iam.yaml
+        run: cfn-lint infra/aws/*.yaml
 
       - name: Check Ansible syntax
         working-directory: ansible

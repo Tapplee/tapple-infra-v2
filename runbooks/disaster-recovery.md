@@ -9,11 +9,19 @@ IDC 공급자에 달려 있어 전체 RTO는 수시간이 될 수 있다. 실제
 
 ## 전제
 
-- 오브젝트 스토리지에 있어야 하는 것: ① 최신 pg_dump ② (선택) k3s sqlite 스냅샷
+- 전용 AWS S3 backup bucket에 있어야 하는 것: 같은 실행 이름의 최신
+  `*.dump`·`*.dump.sha256`·`*.dump.complete` 세 객체
 - AWS에 남아 있어야 하는 것: `/tapple/` 이름의 Secrets Manager JSON Secret,
-  `tapple-external-secrets-iam` CloudFormation stack, 환경별 `tapple-secrets-*` IAM Role
+  `tapple-external-secrets-iam`과 `tapple-postgres-backup-s3` CloudFormation stack,
+  환경별 `tapple-secrets-*` IAM Role
 - 운영자 비밀 관리 도구에 있어야 하는 것: `tapple-external-secrets-bootstrap` access key.
   이 값은 백업 파일이나 Git에 복사하지 않는다. 유실했으면 기존 값을 찾지 말고 새 access key를 발급한다.
+- 복구 controller에 있어야 하는 것: stack output과 Secret 이름만 읽는 AWS control profile과,
+  전용 backup bucket의 `postgres/prod/` prefix에
+  `ListBucket`(prefix 조건)·`ListBucketMultipartUploads`·`GetObject`·`GetObjectVersion`만
+  가능한 별도 restore profile. restore profile에는 CloudFormation·Secrets Manager·write/delete
+  권한을 주지 않고 ESO·Kubernetes·PR CI에도 넣지 않는다. 클러스터의
+  `tapple-postgres-backup-writer`는 의도적으로 List/Get/Delete 권한이 없어 복구에 재사용하지 않는다.
 - Ansible controller에 있어야 하는 것: Ansible, 이 레포 복사본, 검증한 IDC 노드
   SSH host key, SSH private key, IDC 콘솔 접근 수단, AWS 운영 권한
 - 아래 원격 검증에 쓰는 `IDC_SSH_USER`는 root 또는 passwordless sudo 가능 계정이어야 한다.
@@ -27,11 +35,18 @@ IDC 공급자에 달려 있어 전체 RTO는 수시간이 될 수 있다. 실제
 set -euo pipefail
 
 # 1. AWS의 시크릿 원본과 IAM이 살아 있는지 확인한다. Secret value는 조회하지 않는다.
-aws cloudformation describe-stacks \
+AWS_CONTROL_PROFILE="${AWS_CONTROL_PROFILE:?AWS control profile 이름을 설정하세요}"
+AWS_RESTORE_PROFILE="${AWS_RESTORE_PROFILE:?S3 read-only restore profile 이름을 설정하세요}"
+test "$AWS_CONTROL_PROFILE" != "$AWS_RESTORE_PROFILE"
+aws --profile "$AWS_CONTROL_PROFILE" cloudformation describe-stacks \
   --stack-name tapple-external-secrets-iam \
   --region ap-northeast-2 \
   --query 'Stacks[0].StackStatus' --output text
-aws secretsmanager list-secrets \
+aws --profile "$AWS_CONTROL_PROFILE" cloudformation describe-stacks \
+  --stack-name tapple-postgres-backup-s3 \
+  --region ap-northeast-2 \
+  --query 'Stacks[0].StackStatus' --output text
+aws --profile "$AWS_CONTROL_PROFILE" secretsmanager list-secrets \
   --region ap-northeast-2 \
   --filters Key=name,Values=/tapple/ \
   --query 'SecretList[].Name' --output text
@@ -94,17 +109,122 @@ ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
   'sudo -n k3s kubectl delete job -n db -l app.kubernetes.io/name=pg-backup --ignore-not-found --wait=true --timeout=180s'
 
-# 9. PostgreSQL이 준비된 뒤 기존 DB를 강제로 끊고 빈 DB로 다시 만든 다음 복원한다.
-#    dump는 SSH stdin으로만 넘기고 IDC 노드 디스크에 임시 복사하지 않는다.
+# 9. 승인된 운영자 read 자격증명으로 완료 marker가 있는 가장 최근 S3 backup을 선택한다.
+#    클러스터 writer key를 사용하지 않는다. marker 본문과 같은 이름의 dump/checksum만 받는다.
+BACKUP_STACK=tapple-postgres-backup-s3
+BACKUP_REGION="$(aws --profile "$AWS_CONTROL_PROFILE" cloudformation describe-stacks \
+  --stack-name "$BACKUP_STACK" --region ap-northeast-2 \
+  --query 'Stacks[0].Outputs[?OutputKey==`BackupBucketRegion`].OutputValue | [0]' \
+  --output text)"
+BACKUP_BUCKET="$(aws --profile "$AWS_CONTROL_PROFILE" cloudformation describe-stacks \
+  --stack-name "$BACKUP_STACK" --region "$BACKUP_REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`BackupBucketName`].OutputValue | [0]' \
+  --output text)"
+BACKUP_OWNER="$(aws --profile "$AWS_CONTROL_PROFILE" cloudformation describe-stacks \
+  --stack-name "$BACKUP_STACK" --region "$BACKUP_REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`BackupBucketOwnerAccountId`].OutputValue | [0]' \
+  --output text)"
+test -n "$BACKUP_REGION"
+test -n "$BACKUP_BUCKET"
+case "$BACKUP_OWNER" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *) exit 1 ;;
+esac
+
+# 최근의 서로 다른 완료 세트를 먼저 사람이 확인한다. 최신 세트가 checksum/임시 restore에 실패하면
+# 이 목록의 이전 marker를 BACKUP_MARKER_KEY로 지정해 9번을 다시 실행한다.
+# noncurrent object version 탐색은 이 최소권한 절차의 자동 범위가 아니다.
+aws --profile "$AWS_RESTORE_PROFILE" s3api list-objects-v2 \
+  --bucket "$BACKUP_BUCKET" \
+  --prefix postgres/prod/ \
+  --expected-bucket-owner "$BACKUP_OWNER" \
+  --region "$BACKUP_REGION" \
+  --query "reverse(sort_by(Contents[?ends_with(Key, '.complete')], &LastModified))[:10].[LastModified,Key]" \
+  --output table
+
+LATEST_MARKER_KEY="$(aws --profile "$AWS_RESTORE_PROFILE" s3api list-objects-v2 \
+  --bucket "$BACKUP_BUCKET" \
+  --prefix postgres/prod/ \
+  --expected-bucket-owner "$BACKUP_OWNER" \
+  --region "$BACKUP_REGION" \
+  --query "reverse(sort_by(Contents[?ends_with(Key, '.complete')], &LastModified))[0].Key" \
+  --output text)"
+test "$LATEST_MARKER_KEY" != None
+MARKER_KEY="${BACKUP_MARKER_KEY:-$LATEST_MARKER_KEY}"
+case "$MARKER_KEY" in
+  postgres/prod/taple-????????T??????Z-????????-????-????-????-????????????.dump.complete) ;;
+  *) exit 1 ;;
+esac
+
+RESTORE_DIR="$(mktemp -d)"
+chmod 700 "$RESTORE_DIR"
+MARKER_FILE="$RESTORE_DIR/selected.complete"
+BACKUP_FILE=""
+BACKUP_SHA256_FILE=""
+cleanup_restore_artifacts() {
+  for restore_artifact in "$BACKUP_FILE" "$BACKUP_SHA256_FILE" "$MARKER_FILE"; do
+    if test -n "$restore_artifact" && test -f "$restore_artifact"; then
+      unlink "$restore_artifact"
+    fi
+  done
+  if test -d "$RESTORE_DIR"; then
+    rmdir "$RESTORE_DIR"
+  fi
+}
+trap cleanup_restore_artifacts EXIT
+trap 'exit 1' HUP INT TERM
+read -r marker_sse marker_checksum marker_version <<EOF
+$(aws --profile "$AWS_RESTORE_PROFILE" s3api head-object \
+  --bucket "$BACKUP_BUCKET" --key "$MARKER_KEY" \
+  --expected-bucket-owner "$BACKUP_OWNER" --region "$BACKUP_REGION" \
+  --checksum-mode ENABLED \
+  --query '[ServerSideEncryption,ChecksumSHA256,VersionId]' --output text)
+EOF
+test "$marker_sse" = AES256
+test -n "$marker_checksum" && test "$marker_checksum" != None
+test -n "$marker_version" && test "$marker_version" != None
+aws --profile "$AWS_RESTORE_PROFILE" s3api get-object \
+  --bucket "$BACKUP_BUCKET" --key "$MARKER_KEY" \
+  --expected-bucket-owner "$BACKUP_OWNER" --region "$BACKUP_REGION" \
+  --version-id "$marker_version" --checksum-mode ENABLED \
+  "$MARKER_FILE" >/dev/null
+backup_name="$(cat "$MARKER_FILE")"
+test "$MARKER_KEY" = "postgres/prod/${backup_name}.complete"
+case "$backup_name" in
+  taple-????????T??????Z-????????-????-????-????-????????????.dump) ;;
+  *) exit 1 ;;
+esac
+
+BACKUP_FILE="$RESTORE_DIR/$backup_name"
+BACKUP_SHA256_FILE="${BACKUP_FILE}.sha256"
+for suffix in "" .sha256; do
+  key="postgres/prod/${backup_name}${suffix}"
+  read -r object_sse object_checksum object_version <<EOF
+$(aws --profile "$AWS_RESTORE_PROFILE" s3api head-object \
+  --bucket "$BACKUP_BUCKET" --key "$key" \
+  --expected-bucket-owner "$BACKUP_OWNER" --region "$BACKUP_REGION" \
+  --checksum-mode ENABLED \
+  --query '[ServerSideEncryption,ChecksumSHA256,VersionId]' --output text)
+EOF
+  test "$object_sse" = AES256
+  test -n "$object_checksum" && test "$object_checksum" != None
+  test -n "$object_version" && test "$object_version" != None
+  printf 'selected %s version %s\n' "$key" "$object_version"
+  aws --profile "$AWS_RESTORE_PROFILE" s3api get-object \
+    --bucket "$BACKUP_BUCKET" --key "$key" \
+    --expected-bucket-owner "$BACKUP_OWNER" --region "$BACKUP_REGION" \
+    --version-id "$object_version" --checksum-mode ENABLED \
+    "$RESTORE_DIR/${backup_name}${suffix}" >/dev/null
+done
+
+# PostgreSQL이 준비된 뒤 기존 DB를 강제로 끊고 빈 DB로 다시 만든 다음 복원한다.
+# dump는 SSH stdin으로만 넘기고 IDC 노드 디스크에 임시 복사하지 않는다.
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
   'sudo -n k3s kubectl rollout status statefulset/postgres -n db --timeout=300s'
-BACKUP_FILE='/안전한/경로/taple-latest.dump'
-BACKUP_SHA256_FILE="${BACKUP_FILE}.sha256"
 test -s "$BACKUP_FILE"
 test -r "$BACKUP_SHA256_FILE"
-# 두 파일은 오브젝트 스토리지에서 version ID를 확인해 같은 백업 실행의 것으로 내려받는다.
-# 버킷의 versioning/보존 정책이 켜져 있지 않다면 컷오버 전에 먼저 구성한다.
 EXPECTED_BACKUP_SHA256="$(awk 'NR == 1 { print $1 }' "$BACKUP_SHA256_FILE")"
+EXPECTED_BACKUP_NAME="$(awk 'NR == 1 { print $2 }' "$BACKUP_SHA256_FILE")"
 ACTUAL_BACKUP_SHA256="$(python3 - "$BACKUP_FILE" <<'PY'
 import hashlib
 import sys
@@ -117,11 +237,23 @@ print(digest.hexdigest())
 PY
 )"
 test "${#EXPECTED_BACKUP_SHA256}" -eq 64
+test "$EXPECTED_BACKUP_NAME" = "$backup_name"
 test "$ACTUAL_BACKUP_SHA256" = "$EXPECTED_BACKUP_SHA256"
 # custom-format dump가 끝까지 파싱되는지 DB 삭제 전에 PostgreSQL 16 도구로 검증한다.
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
   'sudo -n k3s kubectl exec -i -n db postgres-0 -- pg_restore --list >/dev/null' \
   < "$BACKUP_FILE"
+# production DB를 지우기 전에 같은 새 노드의 임시 DB에 실제 restore하고 relation 존재를 확인한다.
+ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
+  'sudo -n k3s kubectl exec -n db postgres-0 -- sh -ceu '\''dropdb --if-exists --force -U "$POSTGRES_USER" tapple_restore_verify; createdb -U "$POSTGRES_USER" tapple_restore_verify'\'''
+ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
+  'sudo -n k3s kubectl exec -i -n db postgres-0 -- sh -ceu '\''pg_restore --exit-on-error --no-owner -U "$POSTGRES_USER" -d tapple_restore_verify'\''' \
+  < "$BACKUP_FILE"
+RESTORED_RELATIONS="$(ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
+  'sudo -n k3s kubectl exec -n db postgres-0 -- sh -ceu '\''psql -At -U "$POSTGRES_USER" -d tapple_restore_verify -c "select count(*) from pg_catalog.pg_class where relkind in ('\''\''r'\''\'', '\''\''p'\''\'') and relnamespace not in (select oid from pg_catalog.pg_namespace where nspname like '\''\''pg_%'\''\'' or nspname = '\''\''information_schema'\''\'')"'\''' )"
+test "$RESTORED_RELATIONS" -gt 0
+ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
+  'sudo -n k3s kubectl exec -n db postgres-0 -- sh -ceu '\''dropdb --force -U "$POSTGRES_USER" tapple_restore_verify'\'''
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
   'sudo -n k3s kubectl exec -n db postgres-0 -- sh -ceu '\''dropdb --if-exists --force -U "$POSTGRES_USER" "$POSTGRES_DB"; createdb -U "$POSTGRES_USER" "$POSTGRES_DB"'\'''
 ssh "${IDC_SSH_USER}@${IDC_NODE_HOST}" \
@@ -190,6 +322,11 @@ curl -fsS "${PROD_API_URL%/}/actuator/health"
 #    사용자 목록은 Grafana 의 sqlite(PVC)에 있어 Git 이 복원해주지 않는다.
 #    대시보드·데이터소스는 자동 복원되므로 사람만 다시 넣으면 된다.
 #    절차: docs/monitoring-access.md 의 "팀원 등록"
+
+# 13. restore controller의 임시 dump·checksum·marker를 폐기한다. 중간 실패·signal에서도
+#     EXIT trap이 위에서 만든 정확한 세 파일과 빈 임시 디렉터리만 정리한다.
+cleanup_restore_artifacts
+trap - EXIT HUP INT TERM
 ```
 
 ## 검증 체크리스트
@@ -201,7 +338,7 @@ curl -fsS "${PROD_API_URL%/}/actuator/health"
 - [ ] `k3s kubectl get secretstore,externalsecret -A`의 Ready 전부 True
 - [ ] `k3s kubectl get pod postgres-0 -n db -o jsonpath='{.status.qosClass}'` = Guaranteed
 - [ ] 앱 → DB 쿼리 정상 (헬스체크 200)
-- [ ] 다음 pg-backup CronJob 성공 확인
+- [ ] 다음 pg-backup CronJob 성공과 S3 `.complete` marker 확인
 - [ ] Grafana 로그인 + 팀원 계정 재등록 완료 (Git 이 복원하지 않는 유일한 상태)
 
 `aws-bootstrap`은 재해 복구 때 매번 재생성하는 secret-zero다. Kubernetes Secret이나

@@ -164,12 +164,12 @@ apps/                       ArgoCD Application 정의 — root가 재귀 sync
 charts/tapple-server/       자작 앱 Helm 차트 + values.yaml(prod)·values-dev.yaml·values-preview.yaml
 charts/tapple-secrets/      10 SecretStore·15 ExternalSecret·JSON property 계약 (값 없음)
 manifests/cluster/          namespace·PSA warn/audit·PriorityClass·RBAC + Argo CD custom health
-manifests/postgres/         prod DB — PostgreSQL 16.15 digest·Service·NetworkPolicy·중지된 백업 CronJob·읽기전용 롤 Job
+manifests/postgres/         prod DB — PostgreSQL 16.15 digest·Service·NetworkPolicy·AWS S3 backup CronJob(활성화 gate)·읽기전용 롤 Job
 manifests/postgres-dev/     dev DB — 축소판 (백업 없음, 우선순위 최하) + NetworkPolicy
 manifests/postgres-preview/ 프리뷰 공유 DB + 고아 database 정리 CronJob
 manifests/monitoring/       대시보드 7개·알림 규칙 ConfigMap(gen 산출물) + NetworkPolicy
 secrets/                    Secrets Manager/IAM/bootstrap/rotation 운영 가이드 (값 없음)
-infra/                      AWS IAM CloudFormation + legacy shell fallback
+infra/                      ESO IAM·전용 backup S3/IAM CloudFormation + legacy shell fallback
 scripts/gen-configmaps.py   v1의 대시보드·규칙 원본 → ConfigMap 변환
 scripts/gen-team-kubeconfig.sh  팀원용 SA 토큰 kubeconfig 발급 (기본 90일)
 scripts/bootstrap-external-secrets-aws.sh  legacy secret-zero fallback (표준은 Ansible)
@@ -213,8 +213,11 @@ python3 scripts/gen-configmaps.py /다른/경로/config       # 원본 위치가
 | 알림 제목 | `deployment_environment` = prod / dev |
 | Loki 로그 알림 | **prod 만** — 규칙이 `{service_name="taple"}` 하드코딩. dev 가 알림을 보내지 않는 건 의도된 동작 |
 
-availability alert는 실제 scrape target(node-exporter·Tempo·Collector·Loki·Prometheus·
-Alertmanager·Grafana)에만 둔다. 다만 Prometheus와 Alertmanager도 같은 단일 노드에 있으므로
+availability alert는 실제 scrape target(node-exporter·Tempo·Collector·kube-state-metrics·
+Loki·Prometheus·Alertmanager·Grafana)에만 둔다. 앱은 세 환경 모두 trace head sampling을
+`1.0`으로 고정하고 Collector도 sampling processor 없이 Tempo로 전달한다. 이는 의도적 sampling이
+없다는 뜻이지 장애·memory limiter·queue 포화에도 무손실이라는 뜻은 아니므로 수신 거부·queue·
+export 실패를 별도 경보한다. Prometheus와 Alertmanager도 같은 단일 노드에 있으므로
 노드·클러스터·회선 전체가 죽으면 알림도 같이 죽는다. `NodeExporterDown`은 Prometheus가
 살아 있을 때의 exporter/scrape 장애일 뿐이며, 전체-node 감시는 IDC 밖 uptime monitor가 맡아야 한다.
 
@@ -230,11 +233,11 @@ Alertmanager·Grafana)에만 둔다. 다만 Prometheus와 Alertmanager도 같은
 | PriorityClass | `app-important` / `db-critical` | `dev-low` | `preview-lowest` (**가장 먼저 축출**) |
 | DB명 | `tapple` | `tapple_dev` | `tapple_pr<PR번호>` |
 | 외부 Ingress | 기본 비활성 | 기본 비활성 | 기본 비활성 |
-| 백업 | 매일 03:00 Asia/Seoul, 지연 허용 1h (`suspend: true`) | 없음 | 없음 (7일 미접속 시 database 삭제) |
+| 백업 | 전용 AWS S3로 매일 03:00 Asia/Seoul, 지연 허용 1h (`suspend: true`, restore 리허설 후 활성화) | 없음 | 없음 (7일 미접속 시 database 삭제) |
 | 관측 | `service_name=taple` | `taple-dev` | `taple-pr<번호>` |
 | 트리거 | 앱 `main` merge | 앱 `dev` merge | PR 에 `preview` 라벨 |
 
-**동시 프리뷰의 정책 상한은 6개다.** 명시된 상주 request 뒤 계산상 여유는 약 7.9Gi이고
+**동시 프리뷰의 정책 상한은 6개다.** 명시된 상주 request 뒤 계산상 여유는 약 7.05Gi이고
 PR당 1Gi를 예약하지만, 이 값에는 Traefik·일부 k3s 시스템 파드와 실제 사용량이 빠져 있다.
 `preview-budget` ResourceQuota가 Deployment 6개와 namespace 예산을 강제하되, 실제 IDC에서
 6개가 동시에 안정적인지는 부하·eviction 실측으로 다시 확인한다. `preview` 라벨이 곧 자리
@@ -280,11 +283,11 @@ Ansible은 현재 SSH peer가 allowlist에 남는지 먼저 확인하고, 원하
 | dev PostgreSQL | 2Gi / 250m | 2Gi / 1000m | Burstable |
 | dev 앱 | 2Gi / 250m | 3Gi / 1500m | Burstable |
 | 프리뷰 공유 PostgreSQL | 1Gi / 200m | 1Gi / 1000m | Burstable |
-| 모니터링 스택 전체 | 2704Mi(~2.64Gi) / 635m | memory 4640Mi(~4.53Gi) | Burstable |
+| 모니터링 스택 전체 | 3536Mi(~3.45Gi) / 955m | memory 6560Mi(~6.41Gi) | Burstable |
 | ArgoCD | 688Mi(~0.67Gi) / 400m | memory 2752Mi(~2.69Gi) / CPU 4200m | Burstable |
 | External Secrets | 128Mi / 40m | memory 256Mi | Burstable |
 | Traefik·k3s 시스템 파드 | 배포 후 실측 | 배포 후 실측 | upstream/내장 |
-| **명시된 상주 requests 소계** | **20928Mi(20.4375Gi) / 4775m** | | Traefik·k3s 시스템 파드와 프리뷰 앱은 별도 |
+| **명시된 상주 requests 소계** | **21760Mi(21.25Gi) / 5095m** | | 계산상 여유 약 7.05Gi / 1.9 vCPU. Traefik·k3s 시스템 파드와 프리뷰 앱은 별도 |
 
 - requests는 **스케줄러가 자리를 잡아두는 예약**일 뿐이라, 유휴 CPU는 limits 한도까지 다른 파드가 그대로 쓴다 → prod 앱은 순간 3코어까지 뻗을 수 있음.
 - 축출 순서: `dev-low`(-100) → 모니터링·기본(0) → `app-important`(1000) → `db-critical`(1000000).
@@ -328,7 +331,7 @@ helm template tapple-secrets charts/tapple-secrets \
 (cd ansible && ansible-playbook --syntax-check \
   -i inventories/idc/hosts.example.yml playbooks/bootstrap.yml)
 (cd ansible && ansible-lint playbooks/bootstrap.yml)
-cfn-lint infra/aws/external-secrets-iam.yaml
+cfn-lint infra/aws/*.yaml
 ```
 
 같은 핵심 검사는 `.github/workflows/validate.yml`이 push와 PR에서 수행한다. 클러스터가 있으면
@@ -391,7 +394,8 @@ PR 프리뷰 쪽 함정 4개(라벨 필터 위치, sprig `substr` 인자 순서,
 - [ ] Grafana 외 monitoring upstream 차트 4종 설치 시점 최신 고정 (Grafana·ESO는 고정 완료)
 - [ ] **외부 전체-node 감시** — IDC 밖 uptime monitor가 Cloudflare HTTPS와 별도 heartbeat를 확인하도록 구성. 같은 노드의 Prometheus/Alertmanager만으로 물리 노드·클러스터·회선 전체 소실을 감지할 수 없다.
 - [ ] IDC 물리 서버의 실제 CPU·메모리·NVMe·공인 IP·회선·원격 손 SLA와 월 요금 확인 — 매니페스트의 현재 용량 가정은 **8 vCPU / 32GB**다.
-- [ ] **백업 컷오버** — 현재 CronJob은 매일 03:00 `Asia/Seoul`, `startingDeadlineSeconds: 3600`으로 정의됐지만 `suspend: true`다. 외부 오브젝트 스토리지와 restore 리허설은 아직 이 구현의 완료 범위가 아니며, 별도 검증 뒤에만 `false`로 바꾼다.
+- [ ] **백업 컷오버** — 전용 AWS S3 bucket·write-only writer stack, 35일 lifecycle, checksum/완료 marker CronJob과 실패·지연 경보까지 정의했다. 실제 전역 고유 bucket 이름으로 stack 배포 → writer key를 `/tapple/prod/backup-s3`에 입력 → `pg_database_size`·dump 크기/시간·nodefs 여유를 재고 25Gi ephemeral 예약과 2시간 deadline을 p95의 2배 수준으로 조정 → 일회성 업로드·별도 DB restore 리허설을 통과한 뒤에만 `suspend: false`로 바꾼다. local-path PVC의 20Gi 요청은 실제 quota가 아니다.
+- [ ] **backup egress 최소화** — 현재 DB NetworkPolicy는 ingress만 제한해 backup Pod의 egress는 열려 있다. 표준 NetworkPolicy는 S3 FQDN을 직접 허용할 수 없으므로, 활성화 전에 PostgreSQL 5432·CoreDNS 53·private/cluster CIDR을 제외한 HTTPS 443만 허용하는 정책을 실제 k3s DNAT/DNS에서 검증한다. 그래도 임의 public 443 exfiltration 가능성은 남는다는 한계를 기록한다.
 - [ ] Traefik `trustedIPs`(Cloudflare 대역) — 없으면 로그·레이트리밋에 실 사용자 IP 대신 Cloudflare IP가 찍힘
 - [ ] ghcr retention — 오래된 이미지 자동 삭제 (최근 N개 + 배포 중 태그는 보존)
 - [ ] Secrets Manager 자동 회전 — IDC PostgreSQL·대상 서비스로의 안전한 네트워크 경로와 무중단 회전 계약을 먼저 만든 뒤 도입. 현재는 수동 회전한다.

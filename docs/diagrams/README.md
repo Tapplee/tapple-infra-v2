@@ -96,7 +96,8 @@ desired state만으로 라이브 그림을 미리 만들지는 않는다.
 - 앱 Ingress 점선은 현재 리소스가 있다는 뜻이 아니라 실제 host·같은-host TLS Secret을 준비하고 `ingress.enabled=true`로 켠 뒤 생기는 경로다.
 - `origin/main` 보호는 기존 workflow를 먼저 원격에 merge하고 `Static validation` 성공을 확인한 다음, 조직 2FA를 UI에서 수동 강제하고 branch protection을 적용하는 순서다.
 - 같은 노드의 Prometheus/Alertmanager는 전체 node 소실을 알릴 수 없으므로 traffic flow의 외부 uptime monitor를 생략하지 않는다.
-- `pg-backup`은 03:00 Asia/Seoul·deadline 1시간으로 정의됐지만 `suspend:true`라 외부 backup/restore 흐름은 그리지 않는다.
+- `pg-backup`→전용 AWS S3 점선은 desired 경로다. bucket stack 배포, writer key 공급,
+  일회성 upload와 별도 DB restore 리허설을 통과하기 전에는 `suspend:true`라 실행되지 않는다.
 
 **배경을 `transparent` 로 두면 안 된다.** `diagrams` 의 `Cluster` 는 자체 밝은 배경색을 갖고 있어서, 글자만 밝게 바꾸면 밝은 박스 위 밝은 글자가 되어 읽을 수 없다. 페이지 배경·클러스터 배경·글자색을 한 세트로 지정한다.
 

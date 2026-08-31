@@ -22,12 +22,13 @@ spec:
         mode: deployment
         replicaCount: 1
         image:
-          # contrib 배포판 — probabilistic_sampler 포함
+          # compose와 같은 contrib 배포판. k3s에서는 sampling processor를 두지 않는다.
           repository: otel/opentelemetry-collector-contrib
           tag: 0.152.0 # compose와 동일
         resources:
-          requests: { cpu: 100m, memory: 256Mi }
-          limits: { memory: 512Mi }
+          # trace 100% 수집의 초기 예산. 실제 accepted/refused/export 지표로 재조정한다.
+          requests: { cpu: 250m, memory: 512Mi }
+          limits: { memory: 1Gi }
         # 사용하지 않는 receiver port는 Service에서도 닫고, Collector 자체 metrics만
         # Prometheus가 scrape할 수 있게 연다.
         ports:
@@ -50,8 +51,8 @@ spec:
             zipkin: null
             prometheus: null
           processors:
-            # chart 권장 percentage 설정으로 512Mi container limit의 80%(약 410Mi)를
-            # hard limit, 25%(128Mi)를 spike 여유로 둔다. 각 pipeline의 첫
+            # chart 권장 percentage 설정으로 1Gi container limit의 80%(약 819Mi)를
+            # hard limit, 25%(256Mi)를 spike 여유로 둔다. 각 pipeline의 첫
             # processor여야 backpressure가 먼저 걸린다.
             memory_limiter:
               check_interval: 5s
@@ -60,10 +61,6 @@ spec:
             batch:
               send_batch_size: 1024
               timeout: 5s
-            # head sampling 10% (트레이스만 — 메트릭·로그는 전량).
-            # 32GB로 올린 뒤에도 유지 — 메모리보다 Tempo 디스크(PVC 5Gi)가 먼저 찬다
-            probabilistic_sampler:
-              sampling_percentage: 10
           exporters:
             otlphttp/prometheus:
               endpoint: http://prometheus-server.monitoring.svc.cluster.local:80/api/v1/otlp
@@ -82,7 +79,8 @@ spec:
                 exporters: [otlphttp/prometheus]
               traces:
                 receivers: [otlp]
-                processors: [memory_limiter, probabilistic_sampler, batch]
+                # 앱도 OTEL_TRACE_SAMPLE=1.0으로 고정한다. 여기서 다시 버리지 않는다.
+                processors: [memory_limiter, batch]
                 exporters: [otlphttp/tempo]
               logs:
                 receivers: [otlp]

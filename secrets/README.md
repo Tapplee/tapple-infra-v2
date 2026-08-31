@@ -62,7 +62,7 @@ Manager의 JSON Secret 하나로 묶어 비용과 운영 오브젝트 수를 줄
 | `/tapple/preview/app-secrets` | `app-preview` | `preview/app-secrets` |
 | `/tapple/prod/postgres-secrets` | `POSTGRES_DB`, `POSTGRES_PASSWORD`, `POSTGRES_USER` | `db/postgres-secrets` |
 | `/tapple/prod/postgres-readonly` | `RO_PASSWORD` | `db/postgres-readonly` |
-| `/tapple/prod/backup-s3` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_ENDPOINT` | `db/backup-s3` |
+| `/tapple/prod/backup-s3` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET`, `S3_EXPECTED_BUCKET_OWNER` | `db/backup-s3` |
 | `/tapple/dev/postgres-secrets` | `POSTGRES_DB`, `POSTGRES_PASSWORD`, `POSTGRES_USER` | `dev-db/postgres-secrets` |
 | `/tapple/preview/postgres-preview-secrets` | `POSTGRES_PASSWORD`, `POSTGRES_USER` | `preview/postgres-preview-secrets` |
 | `/tapple/shared/ghcr-pull` | `dockerconfigjson` | `app/ghcr-pull`, `dev-app/ghcr-pull`, `preview/ghcr-pull` |
@@ -71,7 +71,7 @@ Manager의 JSON Secret 하나로 묶어 비용과 운영 오브젝트 수를 줄
 | `/tapple/platform/monitoring/alertmanager-discord` | `discord-webhook` | `monitoring/alertmanager-discord` |
 | `/tapple/platform/argocd/preview-github-token` | `token` | `argocd/preview-github-token` |
 
-`app-full`은 다음 35개 property를 정확히 포함한다.
+`app-full`은 다음 34개 property를 정확히 포함한다.
 
 ```text
 CORS_ALLOWED_ORIGINS
@@ -90,7 +90,6 @@ JWT_ACCESS_EXPIRATION
 JWT_REFRESH_EXPIRATION
 JWT_SECRET_KEY
 OTEL_AUTH_HEADER
-OTEL_TRACE_SAMPLE
 POSTGRES_PASSWORD
 POSTGRES_USERNAME
 PUBLIC_API_ORIGIN
@@ -112,7 +111,7 @@ SWAGGER_REDIRECT_URI
 ```
 
 `app-preview`는 PR마다 달라 ApplicationSet이 평문 설정으로 넣는 URL·CORS·리다이렉트
-property를 제외한 다음 27개다.
+property를 제외한 다음 26개다.
 
 ```text
 DISCORD_ERRORS_ID
@@ -128,7 +127,6 @@ JWT_ACCESS_EXPIRATION
 JWT_REFRESH_EXPIRATION
 JWT_SECRET_KEY
 OTEL_AUTH_HEADER
-OTEL_TRACE_SAMPLE
 POSTGRES_PASSWORD
 POSTGRES_USERNAME
 REFRESH_COOKIE_SAME_SITE
@@ -148,6 +146,11 @@ AWS의 `dockerconfigjson` property 값은 base64 문자열이 아니라 완성�
 원문이다. ESO의 GJSON 경로 문법과 충돌하지 않도록 source property에는 선행 점을 쓰지 않고,
 ExternalSecret이 Kubernetes target key를 `.dockerconfigjson`으로 매핑해
 `kubernetes.io/dockerconfigjson` 타입을 만든다.
+
+`OTEL_TRACE_SAMPLE`은 시크릿이 아니라 배포 정책이므로 세 환경 모두 Helm의 명시적
+`env`에서 `1.0`으로 고정한다. 기존 테스트 클러스터의 `app-secrets`에 이 key가 남아 있어도
+명시적 `env`가 `envFrom`보다 우선하지만, 아래 보존·폐기 절차에 따라 source와 Kubernetes
+Secret에서 제거해 계약을 정리한다.
 
 ### 알려진 호환 부채: 앱의 DB 값 중복
 
@@ -187,7 +190,47 @@ access key 하나를 발급해 승인된 비밀 관리 도구에 바로 저장�
 customer-managed KMS key로 바꾸면 각 역할에 해당 key ARN의 `kms:Decrypt` 권한과 key policy를
 추가해야 한다. 그 변경 없이 CMK로 암호화하면 ExternalSecret은 `AccessDenied`가 된다.
 
-### 2. 13개의 JSON Secret 입력
+### 2. PostgreSQL backup 전용 AWS S3 경계
+
+애플리케이션 미디어 bucket·자격증명과 backup을 공유하지 않는다. 별도 stack은 35일
+current-object 만료, 35일 noncurrent version 만료, versioning, SSE-S3, public access block,
+bucket-owner-enforced와 TLS 강제를 설정한다. bucket은 stack 삭제·교체에도 `Retain`한다.
+
+```bash
+aws cloudformation deploy \
+  --stack-name tapple-postgres-backup-s3 \
+  --template-file infra/aws/postgres-backup-s3.yaml \
+  --region ap-northeast-2 \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides BackupBucketName=전역에서-고유한-backup-bucket-name
+
+aws cloudformation describe-stacks \
+  --stack-name tapple-postgres-backup-s3 \
+  --region ap-northeast-2 \
+  --query 'Stacks[0].Outputs' --output table
+```
+
+stack은 `postgres/prod/*`에 `PutObject`·`AbortMultipartUpload`만 할 수 있고 bucket 위치만
+확인할 수 있는 `tapple-postgres-backup-writer` IAM user를 만든다. access key는
+CloudFormation output이나 state에 남기지 않기 위해 만들지 않는다. AWS Console에서 이 user의
+access key 하나를 수동 발급해 승인된 비밀 관리 도구에 바로 보관하고, 다음 JSON을
+`/tapple/prod/backup-s3`에 입력한다.
+
+```text
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+AWS_REGION
+S3_BUCKET
+S3_EXPECTED_BUCKET_OWNER
+```
+
+`AWS_REGION`은 stack을 배포한 region, `S3_BUCKET`은 stack의 `BackupBucketName`,
+`S3_EXPECTED_BUCKET_OWNER`는 `BackupBucketOwnerAccountId` output이다. writer는 기존 backup을
+list/read/delete할 수 없다. 복구 담당자는 별도의 승인된 AWS 운영 자격증명으로 객체를
+조회·다운로드한다. 이 분리는 클러스터 자격증명이 탈취돼도 기존 복구 지점을 읽거나 지우지
+못하게 하지만, key 발급·회전과 복구 권한 운영이 한 단계 늘어나는 tradeoff가 있다.
+
+### 3. 13개의 JSON Secret 입력
 
 가장 안전하고 단순한 방법은 AWS Console의 Secrets Manager 편집 화면이다. CLI가 필요하면
 시크릿 값을 `--secret-string '{...}'`처럼 명령행에 직접 쓰지 않는다. repo 밖에 권한이 제한된
@@ -218,7 +261,7 @@ aws secretsmanager put-secret-value \
 `SHARE_PREVIEW_PREVIOUS_SERVICE_TOKEN`에는 현재 `SHARE_PREVIEW_SERVICE_TOKEN`과 같은 값을
 넣고 다음 회전 때 이전 값으로 교체한다.
 
-### 3. canonical bootstrap: Ansible
+### 4. canonical bootstrap: Ansible
 
 Ubuntu 22.04/24.04 x86_64 IDC 서버 한 대의 정식 경로는 [Ansible 가이드](../ansible/README.md)다.
 inventory의 `CHANGE_ME`를 모두 바꾸고 SSH allowlist를 검토한 뒤 실행한다.
@@ -244,7 +287,7 @@ Secret 정의를 프로세스 인자가 아닌 stdin으로 전달한다.
 `infra/k3s-setup.sh`와 `scripts/bootstrap-external-secrets-aws.sh`는 복구용 fallback이다.
 새 노드의 표준 설치·재실행 경로는 Ansible이다.
 
-### 4. 준비 상태 확인
+### 5. 준비 상태 확인
 
 Ansible은 root Application 전에 Argo CD의 `Application`·`SecretStore`·`ExternalSecret`
 custom health를 적용한다. 따라서 sync wave는 오브젝트 생성 순서만 정하는 데서 끝나지 않고,
@@ -297,6 +340,72 @@ Secrets Manager의 자동 회전은 지금 켜지 않는다. 회전 Lambda가 ID
 새 key를 안전하게 발급해 승인된 secret store에 넣은 뒤 Ansible을 다시 실행한다. ESO가
 재시작되고 모든 Store가 Ready인 것을 확인한 다음 이전 IAM access key를 비활성화하고 삭제한다.
 장기 key의 회전 주기와 담당자를 운영 캘린더에 명시한다.
+
+### PostgreSQL backup writer access key 회전
+
+`tapple-postgres-backup-writer`는 최대 두 access key 중 하나만 정상 운영에 둔다. 새 key를
+AWS Console에서 발급해 승인된 비밀 관리 도구에 저장한 뒤, `/tapple/prod/backup-s3` JSON의
+두 access-key property만 새 값으로 갱신한다. 터미널·Git·Kubernetes manifest에 값을 쓰지 않는다.
+회전은 정규 03:00 Job의 최대 2시간 실행 창 밖에서 하고, 수동 Job을 만들기 직전에 active
+backup Job이 없음을 확인한다. `concurrencyPolicy: Forbid`는 수동 생성 Job과의 동시 실행까지
+막아주지 않는다.
+
+```bash
+set -euo pipefail
+
+before_refresh="$(kubectl get externalsecret backup-s3 -n db \
+  -o jsonpath='{.status.refreshTime}')"
+kubectl annotate externalsecret backup-s3 -n db \
+  external-secrets.io/force-sync="$(date +%s)" --overwrite
+
+# 기존 Ready=True를 즉시 통과하지 말고 force-sync 뒤 refreshTime이 실제 바뀔 때까지 기다린다.
+attempts=0
+while :; do
+  after_refresh="$(kubectl get externalsecret backup-s3 -n db \
+    -o jsonpath='{.status.refreshTime}')"
+  ready="$(kubectl get externalsecret backup-s3 -n db \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')"
+  if test "$ready" = True && test -n "$after_refresh" \
+    && test "$after_refresh" != "$before_refresh"; then
+    break
+  fi
+  attempts=$((attempts + 1))
+  if test "$attempts" -ge 90; then
+    echo "backup-s3 ExternalSecret가 새 version으로 갱신되지 않았습니다." >&2
+    exit 1
+  fi
+  sleep 2
+done
+
+active_backups="$(kubectl get jobs -n db \
+  -l app.kubernetes.io/name=pg-backup \
+  -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.active}{"\n"}{end}' \
+  | awk '$2 + 0 > 0 { print $1 }')"
+if test -n "$active_backups"; then
+  echo "active backup Job이 있어 회전을 중단합니다: $active_backups" >&2
+  exit 1
+fi
+
+rotation_job="pg-backup-key-rotation-$(date -u +%Y%m%d%H%M%S)"
+kubectl create job -n db --from=cronjob/pg-backup "$rotation_job"
+kubectl wait --for=condition=Complete "job/$rotation_job" -n db --timeout=7200s
+rotation_pod_uid="$(kubectl get pod -n db -l "job-name=$rotation_job" \
+  -o jsonpath='{.items[?(@.status.phase=="Succeeded")].metadata.uid}')"
+case "$rotation_pod_uid" in
+  ????????-????-????-????-????????????) ;;
+  *) exit 1 ;;
+esac
+```
+
+승인된 클러스터 밖 복구 자격증명(`ListBucket`·`ListBucketMultipartUploads`·
+`GetObject`·`GetObjectVersion`, write/delete 없음)으로 새 `.complete` marker와 세 객체를 확인하고,
+[DR 런북](../runbooks/disaster-recovery.md)의 checksum·`pg_restore --list`·임시 DB restore까지
+통과시킨다. 이때 marker 이름이 `-${rotation_pod_uid}.dump.complete`로 끝나는지 확인해야 다른
+정규 Job의 성공을 새 key 검증으로 오인하지 않는다. 같은 자격증명으로 `postgres/prod/`의
+미완료 multipart upload가 없는지도 확인한다.
+그 뒤에만 이전 access key를 disable하고 다음 정규 backup 성공을 본 후 삭제한다. 실패하면 이전
+key를 다시 enable하고 Secrets Manager를 이전 version으로 되돌린다. 회전 주기·담당자는 운영
+캘린더에 명시하며 복구 read identity와 writer key를 같은 보관 항목으로 합치지 않는다.
 
 ## 보존·폐기와 레거시 정리
 

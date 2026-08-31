@@ -8,6 +8,8 @@
 > v6 (2026-08-31): 기존 D1~D19 번호는 유지하면서 fail-closed Ingress, Cloudflare-only origin 443,
 > disk/inode eviction, PSA warn/audit, 리소스 상한, 실제 scrape target 알림, PR 기반 Git trust root를
 > 현재 desired state에 맞춰 명문화했다.
+> v7 (2026-08-31): **D6·D11·D14 변경 — 세 환경 trace를 100% sampling하고, PostgreSQL backup은
+> 전용 AWS S3 bucket + write-only cluster 자격증명으로 확정.** 용량·경보·복구 gate를 함께 재계산했다.
 
 ---
 
@@ -49,19 +51,19 @@
 | # | 결정 항목 | 확정값 | 근거 |
 |---|---|---|---|
 | D1 | 호스팅 | **임대한 generic IDC 물리 서버 한 대** | 한 공급자 제품명에 설계를 묶지 않는다. 실제 사양·회선·원격 손 SLA는 발주 시 확정 |
-| D2 | 서버 용량 | **8 vCPU / 32GB / NVMe 가정** (v3에서 4 vCPU/16GB → 8 vCPU/32GB) | 명시된 상주 requests 뒤 계산상 여유는 ~7.9Gi / ~2.2 vCPU지만 Traefik·일부 시스템 파드·preview 앱은 별도다. 실제 물리 CPU·메모리로 다시 검증 |
+| D2 | 서버 용량 | **8 vCPU / 32GB / NVMe 가정** (v3에서 4 vCPU/16GB → 8 vCPU/32GB) | 명시된 상주 requests 뒤 계산상 여유는 ~7.05Gi / ~1.9 vCPU지만 Traefik·일부 시스템 파드·preview 앱은 별도다. 실제 물리 CPU·메모리로 다시 검증 |
 | D3 | 오케스트레이터 | **k3s 단일 노드** | 경량 컨트롤 플레인, 내장 Traefik/local-path |
 | D4 | 데이터베이스 | **PostgreSQL StatefulSet, k3s 내부** (v2에서 변경) | 단일 노드라 호스트 분리의 가용성 이점이 절대적이지 않음. k3s 안에 넣으면 DB까지 GitOps 관리 → 재구축 시 ArgoCD apply로 전체 복원. eviction 리스크는 Guaranteed QoS + PriorityClass와 memory·disk·inode hard eviction으로 방어 |
 | D5 | 앱 실행 | k8s Deployment (`app` 네임스페이스, Burstable) | 배포·롤백·자가치유 |
-| D6 | 관측성 | OTel 풀스택 자체 호스팅 (Collector + Tempo + Loki + Prometheus + Grafana) — **조여서** 운영 | 10% trace sampling·retention·모든 workload resource cap·monitoring default-deny ingress로 단일 노드 비용을 제한. 같은 노드의 Prometheus는 노드 전체 소실을 알릴 수 없어 외부 monitor가 별도 필요 |
+| D6 | 관측성 | OTel 풀스택 자체 호스팅 (Collector + Tempo + Loki + Prometheus + Grafana), prod·dev·preview **trace sampling 100%** | 앱 sampling `1.0` + Collector sampler 제거. 대신 Collector/Tempo memory cap과 Tempo PVC 50Gi, 수신 거부·queue·export 경보로 단일 노드 위험을 드러낸다. 100% 정책은 장애 시 무손실 보장이 아니며 같은 노드 전체 소실은 외부 monitor가 맡는다 |
 | D7 | 운영 자동화 | Ansible(host·k3s·Argo CD·secret-zero) + Argo CD(GitOps) + GitHub Actions | bootstrap과 지속 reconciliation의 책임을 분리. Ansible이 upstream Argo workload resource patch까지 적용하고 Git=클러스터 상태로 유지 |
 | D8 | CI | GitHub Actions: SHA 이미지 → `deploy/<env>/<sha>` 브랜치·`image.tag` PR → 필수 `Static validation` → squash auto-merge | 봇도 직접 push하지 않고 사람과 같은 diff·CI 감사 경로를 거친 뒤 ArgoCD가 pull. strict check만큼 배포가 느려지는 tradeoff 수용 |
 | D9 | 인그레스 | Traefik (k3s 내장), 앱 Ingress 기본 비활성 | 실제 host와 같은 host의 TLS Secret을 함께 준비할 때만 `websecure`로 명시 활성화. 컷오버 전 오노출 방지 |
 | D10 | TLS/프론트 | Cloudflare 프록시(orange cloud) + origin cert, DNS도 Cloudflare. UFW는 공식 Cloudflare CIDR→443만 허용하고 public 80은 닫음 | origin 우회와 평문 경로 차단. Cloudflare CIDR 고정 목록을 공식 변경 시 갱신해야 함 |
-| D11 | 미디어/파일 | S3 호환 오브젝트 스토리지(공급자 발주 시 확정) | 노드 소실과 분리하고 외부 백업·미디어 원본으로 사용 |
+| D11 | 미디어/파일 | AWS S3. 애플리케이션 미디어와 PostgreSQL backup은 bucket·IAM 자격증명을 분리 | 노드와 장애 영역을 분리하면서 backup writer 침해가 미디어나 기존 backup의 read/delete 권한으로 번지지 않게 한다 |
 | D12 | 트래픽 | 발주 회선 한도와 실측 트래픽에 알림 설정 | 과거 iwinv 600GB 가정은 폐기. 공급자 조건을 설계 사실로 고정하지 않는다 |
 | D13 | 가용성(SLO) | 짧은 다운 허용. **~10분은 대체 노드가 준비된 뒤 소프트웨어 재구축 목표** | 물리 장비 교체·IDC 원격 손은 공급자 의존이며 수시간 이상 걸릴 수 있다 |
-| D14 | 백업/DR | `pg_dump` CronJob은 매일 03:00 `Asia/Seoul`, 지연 허용 1시간으로 정의하되 운영 컷오버 전 `suspend: true` 유지. 외부 저장·restore는 후속 검증 범위 | 스케줄 의미와 missed-start 경계를 명시하면서, 검증되지 않은 off-node backup을 현재 완료로 과장하지 않는다 |
+| D14 | 백업/DR | 전용 AWS S3 bucket(versioning·SSE-S3·public block·35일 current/noncurrent lifecycle·Retain)과 `postgres/prod/*` write-only IAM user. `pg_dump` CronJob은 checksum과 `.complete` marker를 올리되 restore 리허설 전 `suspend: true` | 클러스터 자격증명은 기존 backup을 list/read/delete하지 못한다. 복구 담당자의 별도 권한과 실제 restore 검증이 늘어나지만 노드·credential 침해의 blast radius를 줄인다 |
 | D15 | 시크릿 | **AWS Secrets Manager + ESO 2.10.0**. Kubernetes Secret 계약별 JSON source 13개, 환경별 IAM role 6개, namespaced `SecretStore` 10개, `ExternalSecret` 15개 | Git에는 이름·property 계약만 둔다. 역할은 `GetSecretValue`를 자기 경로에 제한하고 custom health가 Ready까지 다음 wave를 막는다 |
 | D16 | 서드파티 Helm | **vendoring 안 함.** ArgoCD Application이 upstream chart repo URL + values.yaml만 참조 | Git에는 values만. 차트 복사·포크 불필요 |
 | D17 | PostgreSQL 차트 | **Bitnami 차트 사용 안 함** — 공식 `postgres:16.15-bookworm` sha256 digest + 자작 StatefulSet/Job | 단일 노드엔 StatefulSet이 충분하고 오퍼레이터(CloudNativePG)는 과함. digest로 tag drift를 막는 대신 패치 버전은 PR로 수동 갱신 |
@@ -95,10 +97,10 @@
    │   [preview]          공유 DB + PR별 앱 · preview-lowest      │
    │   [monitoring]       OTel · Tempo · Loki · Prometheus · Grafana │
    └───────────────┬──────────────────────────────────────────────┘
-                   │ pg_dump / k3s 스냅샷
+                   │ pg_dump + SHA-256 + complete marker
           ┌────────▼────────┐
-          │ 외부 오브젝트     │  DB 백업 · k3s 스냅샷 · 미디어
-          │ 스토리지          │  (공급자 발주 시 확정)
+          │ 전용 AWS S3      │  versioning · SSE-S3 · 35일 lifecycle
+          │ backup bucket    │  cluster writer는 put만 허용
           └──────────────────┘
 
    Ansible controller ──secret-zero──> ESO ──AssumeRole──> IAM roles 6개
@@ -148,11 +150,11 @@ maintainer가 생기면 승인 1명으로 올린다.
 | dev PostgreSQL (`dev-db`) | 2Gi / 250m | 2Gi / 1000m | Burstable | `dev-low`. `shared_buffers=512MB` |
 | dev 앱 (`dev-app`) | 2Gi / 250m | 3Gi / 1500m | Burstable | `dev-low` |
 | 프리뷰 공유 PostgreSQL (`preview`) | 1Gi / 200m | 1Gi / 1000m | Burstable | `preview-lowest`. PR별 database 공유 |
-| OTel 스택 (전체) | 2704Mi(~2.64Gi) / 635m | memory 4640Mi(~4.53Gi) | Burstable | 10% trace sampling, Collector limiter, Tempo ballast 256Mi |
+| OTel 스택 (전체) | 3536Mi(~3.45Gi) / 955m | memory 6560Mi(~6.41Gi) | Burstable | trace 100%, Collector limiter, Tempo 50Gi·ballast 256Mi, backup용 제한 KSM 포함 |
 | ArgoCD | 688Mi(~0.67Gi) / 400m | 2752Mi(~2.69Gi) / 4200m | Burstable | upstream 모든 app/init container를 Ansible patch |
 | External Secrets Operator | 128Mi / 40m | memory 256Mi | Burstable | controller·webhook·cert-controller 합 |
 | Traefik·k3s 시스템 파드 | 배포 후 실측 | 배포 후 실측 | upstream/내장 | 현재 표의 명시적 subtotal에서 제외 |
-| **명시된 상주 requests 소계** | **20928Mi(20.4375Gi) / 4775m** | | | 계산상 여유 ~7.9Gi / ~2.2 vCPU, 시스템 파드·preview 앱 별도 |
+| **명시된 상주 requests 소계** | **21760Mi(21.25Gi) / 5095m** | | | 계산상 여유 ~7.05Gi / ~1.9 vCPU, 시스템 파드·preview 앱 별도 |
 
 > requests는 **스케줄러가 잡아두는 예약**일 뿐이라 유휴 CPU는 limits 한도까지 다른 파드가 쓴다 — prod 앱은 순간 3코어까지 뻗을 수 있다.
 
@@ -171,7 +173,8 @@ maintainer가 생기면 승인 1명으로 올린다.
 - [x] PostgreSQL 메이저 버전은 16, 현재 workload와 helper Job 이미지는 **16.15-bookworm의 같은 sha256 digest**로 고정
 - [ ] IDC 물리 서버 발주: 실제 CPU·메모리·NVMe·공인 IP·회선·원격 손 SLA·월 요금 확인, Ubuntu 22.04/24.04 x86_64와 SSH key 준비
 - [ ] Cloudflare 계정 + 도메인 네임서버 이전 (전파 시간 → 최우선 착수)
-- [ ] 노드와 장애 영역이 다른 S3 호환 오브젝트 스토리지 버킷 + key 발급
+- [x] 전용 AWS S3 backup bucket·write-only IAM user CloudFormation과 35일 보존 계약 정의
+- [ ] 실제 전역 고유 bucket 이름으로 `tapple-postgres-backup-s3` stack 배포, writer key 발급과 `/tapple/prod/backup-s3` 입력
 - [ ] GitHub 레포 + `ghcr.io` 토큰
 - [ ] AWS Secrets Manager 13개 JSON source와 ESO bootstrap IAM access key 준비
 
@@ -231,10 +234,10 @@ ansible-playbook playbooks/bootstrap.yml
 - [~] Grafana Origin Certificate는 Secrets Manager→ESO 계약과 Ingress TLS 연결 완료. 실제 인증서 입력, proxied DNS, 나머지 앱 host/TLS와 환경별 `ingress.enabled=true`, SSL Full (strict)은 컷오버 때 적용
 - **검증**: 기본 render에 앱 Ingress 0개, unsafe enable render 실패, 컷오버 뒤 HTTPS 성공·origin 직접 접속 차단·dig로 실 IP 미노출
 
-### Phase 6 — OTel 관측성 (조여서)
-- [x] upstream Helm 차트 정의: 트레이스 샘플링 10%, Tempo 7일/Loki 90일/Prometheus 14일, 모든 workload·sidecar resource cap, Collector memory limiter, Tempo ballast 256Mi
+### Phase 6 — OTel 관측성 (전량 수집 + 경계)
+- [x] 앱 trace sampling `1.0`, Collector sampling processor 없음. Tempo 7일/PVC 50Gi, Loki 90일, Prometheus 14일, 모든 workload·sidecar resource cap, Collector memory limiter, Tempo ballast 256Mi
 - [x] monitoring default-deny ingress + same-namespace·앱→OTLP·Traefik→Grafana 최소 허용
-- [x] 실제 scrape target과 앱/노드 지표에만 맞춘 알림. PostgreSQL·Redis·외부 HTTP를 감시한다고 과장하지 않음
+- [x] 실제 scrape target과 앱/노드 지표에만 맞춘 알림. Collector 수신 거부·queue 포화·export 실패와 backup Job 실패·지연을 포함하고, PostgreSQL·Redis·외부 HTTP를 감시한다고 과장하지 않음
 - [ ] IDC 밖 uptime monitor로 Cloudflare HTTPS·heartbeat 감시 — 같은 노드의 Prometheus/Alertmanager는 전체 노드 소실을 알릴 수 없음
 - **검증**: 트레이스/로그/메트릭 수집, NetworkPolicy 허용/거부, `kubectl top pod -n monitoring` limit 내, 외부 monitor에서 node-offline 알림
 
@@ -253,9 +256,14 @@ ansible-playbook playbooks/bootstrap.yml
 - **검증**: 직접 push·관리자 우회가 거부되고, strict `Static validation`을 통과한 PR만 squash auto-merge된 뒤 Argo CD가 pull
 
 ### Phase 9 — 백업 / DR
-- [x] `pg_dump` CronJob 스케줄 정의: 매일 03:00 `Asia/Seoul`, `startingDeadlineSeconds: 3600`, `suspend: true`
-- [ ] 외부 백업 저장소·보존 정책·restore 흐름은 별도 후속 범위. 검증 전에는 예약 실행을 켜지 않음
-- **검증**: 현재는 CronJob이 suspend 상태이고 시간대·deadline이 원하는 값인지 정적 확인
+- [x] 전용 AWS S3 bucket·write-only writer stack, 35일 lifecycle, TLS/SSE-S3/public-block/versioning/Retain 계약
+- [x] `pg_dump -Fc` → `pg_restore --list` → SHA-256 → dump/checksum/`.complete` 순으로 올리는 CronJob. 매일 03:00 `Asia/Seoul`, `startingDeadlineSeconds: 3600`, `suspend: true`
+- [x] 제한된 kube-state-metrics와 backup terminal failure·30시간 stale 경보 정의
+- [ ] stack 실배포, writer key를 Secrets Manager에 입력. `pg_database_size`·dump 크기/시간·nodefs/DiskPressure를 재고 25Gi ephemeral 예약과 2시간 deadline을 p95 dump+upload의 2배 수준으로 조정
+- [ ] backup Pod egress를 PostgreSQL·CoreDNS·public HTTPS로 줄이는 NetworkPolicy를 실제 k3s DNAT/DNS에서 검증. 표준 정책으로 S3 FQDN만 허용할 수 없어 임의 public 443 위험은 남음을 수용 또는 별도 egress gateway 검토
+- [ ] 일회성 업로드와 별도 임시 DB restore 리허설
+- [ ] 위 검증 뒤에만 CronJob을 `suspend: false`로 변경
+- **검증**: bucket owner/region·remote checksum·SSE 확인, writer의 Get/List/Delete 거부, dump 다운로드·SHA 검증·실제 restore 성공
 
 ### Phase 10 — 검증 & 컷오버
 - [ ] 스테이징 도메인 E2E → DB 최종 재동기화 → DNS 전환
@@ -267,9 +275,9 @@ ansible-playbook playbooks/bootstrap.yml
 ## 6. 주의사항
 
 ### OTel 조이기
-- head sampling 10%, 에러는 tail sampling 고려
-- 현재 보존: Tempo 7일 / Loki 90일 / Prometheus 14일. 32GB 단일 노드에서 디스크·메모리 추세를 보고 Loki부터 줄일 것
-- Collector 512Mi limit + 80% memory limiter, Tempo 768Mi limit + 256Mi ballast를 유지하고 모든 monitoring workload·sidecar의 request/limit 누락을 CI에서 거부
+- 앱 head sampling은 `1.0`, Collector는 sampling processor 없이 전량 전달한다. 이는 정책상 drop이 없다는 뜻이며 Pod/노드 장애, memory limiter, exporter queue 포화까지 무손실로 만든다는 뜻은 아니다
+- 현재 보존: Tempo 7일/PVC 50Gi / Loki 90일 / Prometheus 14일. 32GB 단일 노드에서 실제 trace·디스크·메모리 추세를 보고 retention과 PVC를 조정할 것
+- Collector 1Gi limit + 80% memory limiter, Tempo 2Gi limit + 256Mi ballast를 유지하고 모든 monitoring workload·sidecar의 request/limit 누락을 CI에서 거부
 - 계속 빡빡하면 저장 백엔드만 Grafana Cloud 무료티어 오프로드 (egress 발생)
 
 ### 단일 노드 리스크
@@ -314,12 +322,12 @@ tapple-infra-v2/
 │  └─ tapple-secrets/         # 10 SecretStore·15 ExternalSecret·JSON property 계약 (값 없음)
 ├─ manifests/
 │  ├─ cluster/                 #   namespace·PSA warn/audit·PriorityClass·RBAC·Argo health
-│  ├─ postgres/                #   prod DB — PostgreSQL 16.15 digest·Service·중지된 CronJob
+│  ├─ postgres/                #   prod DB — PostgreSQL 16.15 digest·Service·AWS S3 backup CronJob(gated)
 │  ├─ postgres-dev/            #   dev DB — 축소판
 │  └─ monitoring/              #   대시보드·알림 ConfigMap + NetworkPolicy
 ├─ secrets/                    # Secrets Manager JSON 계약·최초 구성·회전 절차 (D15)
 ├─ infra/
-│  ├─ aws/                     # ESO bootstrap IAM user·환경별 IAM Role CloudFormation
+│  ├─ aws/                     # ESO IAM + 전용 PostgreSQL backup S3/IAM CloudFormation
 │  ├─ node-bootstrap.sh        # legacy fallback
 │  └─ k3s-setup.sh             # legacy fallback
 ├─ scripts/
@@ -343,13 +351,14 @@ tapple-be/.github/workflows/cd-gitops.yml  # build → ghcr.io → 이 레포 im
 - ~~4. 앱 커넥션 풀 ↔ max_connections~~ → Hikari 10 ↔ `max_connections=60`
 - ~~5. 모노레포 vs 분리 레포~~ → `Tapplee/tapple-infra-v2`로 분리 (D18)
 - ~~6. Grafana 알림 채널~~ → Discord webhook, 기존 alertmanager 라우팅 이식
+- ~~미디어/백업용 외부 오브젝트 스토리지~~ → AWS S3 확정. backup은 애플리케이션 미디어와 별도 bucket·writer 사용(D11·D14)
 
 **남음**
 1. 도메인/서브도메인·TLS 구조 — 앱 Ingress는 기본 비활성이고 `*.example.invalid`는 활성화도 거부하는 fail-safe다. IDC 앱·dev·preview의 실제 host와 같은-host TLS Secret 공급을 정한 뒤 환경별로 켠다. preview의 `PUBLIC_*`·CORS·redirect 값도 같은 HTTPS host로 바꾼다. Grafana는 기존 `grafana-k3s.tapple.co.kr`를 유지한다
 2. IDC 물리 서버 실제 사양·회선·원격 손 SLA·월 요금 — 홈서버 대비 **순증 비용**이고 하드웨어 복구 시간의 상한을 결정한다
 3. Traefik `trustedIPs` — Cloudflare 뒤에서 실 클라이언트 IP 복원
 4. BE `prod` 프로파일의 CloudWatch appender — AWS 떠나면 무의미. k3s 전용 프로파일이 필요한지 결정
-5. 미디어/백업용 외부 오브젝트 스토리지 — 현재 AWS S3(`taple-bucket`) 유지 또는 다른 S3 호환 공급자 선택
+5. 실제 AWS S3 backup bucket의 전역 고유 이름과 restore 담당자 권한·리허설 일정
 6. 홈서버 배포(`deploy.yml`)와의 컷오버 순서 — 두 경로가 동시에 main을 배포하지 않게 조정
 7. secret-zero 장기 key 회전 주기·담당자와 IAM Roles Anywhere 전환 조건
 8. Secrets Manager 자동 회전에 필요한 IDC 네트워크 경로와 무중단 회전 계약
@@ -421,7 +430,7 @@ database 를 나누지 않으면 여러 PR 의 Flyway 가 같은 스키마를 �
 | PR 당 | 1 Gi (앱만, prod 의 1/4) |
 | **당시 계산** | 약 8개 — 여유 2Gi 를 남겨 6개 권장 |
 
-명시된 상주 requests는 20928Mi(20.4375Gi)이고 계산상 남은 메모리는 약 7.9Gi다. 여기에는
+명시된 상주 requests는 21760Mi(21.25Gi)이고 계산상 남은 메모리는 약 7.05Gi다. 여기에는
 Traefik·일부 k3s 시스템 파드와 preview 앱의 실제 사용량이 빠져 있다.
 `preview-budget` ResourceQuota가 `count/deployments.apps=6`과 namespace 자원 예산을
 강제하므로 현재 운영 상한은 권장이 아니라 **6개**다.

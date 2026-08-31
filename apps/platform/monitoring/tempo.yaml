@@ -23,8 +23,8 @@ spec:
           tag: 2.10.5 # compose와 동일
           reportingEnabled: false
           retention: 168h # 로컬 tempo.yml block_retention 그대로 (7d)
-          # chart 기본 1024Mi ballast는 768Mi container limit보다 커서 시작부터
-          # OOM 위험이 있다. 256Mi만 예약해 나머지 512Mi를 heap/cache에 남긴다.
+          # 100% trace의 초기 메모리 예산에서도 ballast는 256Mi만 고정하고 나머지를
+          # heap/cache에 남긴다. 실제 ingest와 RSS를 본 뒤 조정한다.
           memBallastSizeMbs: 256
           receivers:
             otlp:
@@ -38,12 +38,14 @@ spec:
             trace_idle_period: 10s
             max_block_duration: 5m
           resources:
-            requests: { cpu: 100m, memory: 512Mi }
-            limits: { memory: 768Mi }
+            requests: { cpu: 250m, memory: 1Gi }
+            limits: { memory: 2Gi }
         persistence:
           enabled: true
           storageClassName: local-path
-          size: 5Gi
+          # 기존 10%/5Gi 모델을 100%/7일에 맞춘 초기값. local-path의 요청 크기는
+          # 실제 quota가 아니므로 node disk 알림과 일별 증가량을 함께 본다.
+          size: 50Gi
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring

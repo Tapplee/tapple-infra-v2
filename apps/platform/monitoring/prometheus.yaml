@@ -69,6 +69,9 @@ spec:
           - job_name: otel-collector
             static_configs:
               - targets: ['otel-collector.monitoring.svc.cluster.local:8888']
+          - job_name: kube-state-metrics
+            static_configs:
+              - targets: ['prometheus-kube-state-metrics.monitoring.svc.cluster.local:8080']
           - job_name: grafana
             static_configs:
               - targets: ['grafana.monitoring.svc.cluster.local:80']
@@ -140,7 +143,18 @@ spec:
             requests: { cpu: 20m, memory: 32Mi }
             limits: { memory: 64Mi }
         kube-state-metrics:
-          enabled: false # 현재 대시보드가 안 씀
+          # pg-backup 실패와 마지막 성공 시각을 클러스터 밖으로 알리기 위한 최소 상태 지표.
+          enabled: true
+          image:
+            sha: sha256:37d841299325c23b56e5951176ce8ef317d537447c0f1b2d2437dddbb1f51165
+          rbac:
+            # Deployment는 monitoring에 두되 조회 권한은 db namespace Role로만 묶는다.
+            useClusterRole: false
+          collectors: [cronjobs, jobs]
+          namespaces: [db]
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { memory: 128Mi }
         prometheus-pushgateway:
           enabled: false
   destination:

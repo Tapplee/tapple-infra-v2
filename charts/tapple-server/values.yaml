@@ -72,6 +72,8 @@ env:
   POSTGRES_URL: jdbc:postgresql://postgres.db.svc.cluster.local:5432/tapple
   # OTLP 게이트웨이 — 메트릭·트레이스·로그 전부 여기로 push (scrape 아님)
   OTEL_URL: http://otel-collector.monitoring.svc.cluster.local:4318
+  # D6: k3s의 prod/dev/preview가 시작하는 root trace를 전량 head sampling한다.
+  OTEL_TRACE_SAMPLE: "1.0"
   # 운영에서만 개인정보·미디어 보유기간 만료 대상을 정기 파기한다.
   MEDIA_STORAGE_PURGE_ENABLED: "true"
   PRIVACY_RETENTION_ENABLED: "true"

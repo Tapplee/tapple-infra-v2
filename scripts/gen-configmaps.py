@@ -37,6 +37,7 @@ K3S_DROPPED_ALERTS = frozenset(
 )
 ALERT_START = re.compile(r"^(?P<indent> *)- alert: (?P<name>[^ ]+)\s*$")
 AVAILABILITY_MARKER = "  - name: taple.availability\n    rules:\n"
+OBSERVABILITY_MARKER = "  - name: taple.observability\n    rules:\n"
 COMMENTED_NODE_EXPORTER_ALERT = """\
       # - alert: NodeExporterDown
       #   expr: up{job="node-exporter"} == 0
@@ -49,7 +50,7 @@ COMMENTED_NODE_EXPORTER_ALERT = """\
 
 """
 K3S_STATIC_ALERTS = """\
-      # k3s에서는 아래 두 Service/port가 실제 Helm render에 존재한다.
+      # k3s에서는 아래 세 Service/port가 실제 Helm render에 존재한다.
       - alert: NodeExporterDown
         expr: up{job="node-exporter"} == 0
         for: 3m
@@ -68,7 +69,96 @@ K3S_STATIC_ALERTS = """\
           summary: "Tempo metrics endpoint를 확인해주세요"
           description: "instance={{ $labels.instance }} 의 Tempo metrics endpoint를 3분 이상 scrape하지 못했어요. Tempo pod, Service와 storage 상태를 확인해주세요."
 
+      - alert: KubeStateMetricsDown
+        expr: up{job="kube-state-metrics"} == 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "kube-state-metrics scrape를 확인해주세요"
+          description: "instance={{ $labels.instance }} 에서 backup Job/CronJob 상태 지표를 3분 이상 받지 못했어요. kube-state-metrics pod와 Service를 확인해주세요."
+
 """
+K3S_OBSERVABILITY_ALERTS = """\
+      # 100% sampling 정책과 실제 전달 성공은 다르다. Collector가 span을 거부하거나
+      # exporter queue가 포화되면 유실 가능성이 있으므로 별도 경보로 드러낸다.
+      - alert: OTelCollectorTraceReceiveRefusals
+        expr: sum by (receiver, transport, instance) (rate(otelcol_receiver_refused_spans[5m]) or rate(otelcol_receiver_refused_spans_total[5m])) > 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OTel Collector가 trace 수신을 거부하고 있어요"
+          description: "receiver={{ $labels.receiver }}, instance={{ $labels.instance }} 에서 span이 3분 이상 거부되고 있어요. memory limiter, Collector RSS와 client retry를 확인해주세요."
+
+      - alert: OTelCollectorTraceEnqueueFailures
+        expr: sum by (exporter, instance) (rate(otelcol_exporter_enqueue_failed_spans[5m]) or rate(otelcol_exporter_enqueue_failed_spans_total[5m])) > 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OTel Collector trace queue 유실을 확인해주세요"
+          description: "exporter={{ $labels.exporter }}, instance={{ $labels.instance }} 의 queue에 span을 넣지 못하고 있어요. Tempo 처리량과 exporter queue를 확인해주세요."
+
+      - alert: OTelCollectorExporterQueueHigh
+        expr: max by (exporter, data_type, instance) (otelcol_exporter_queue_size{data_type="traces"} / clamp_min(otelcol_exporter_queue_capacity{data_type="traces"}, 1)) > 0.7
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OTel Collector exporter queue가 70%를 넘었어요"
+          description: "exporter={{ $labels.exporter }}, data_type={{ $labels.data_type }}, instance={{ $labels.instance }} 의 queue가 5분 이상 70%를 넘었어요. downstream 지연과 trace 유입량을 확인해주세요."
+
+      - alert: PostgresBackupFailed
+        expr: max by (namespace, job_name) (kube_job_failed{namespace="db",job_name=~"pg-backup-.+",condition="true"}) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL S3 backup Job이 실패했어요"
+          description: "job={{ $labels.job_name }} 의 dump, checksum, S3 권한과 bucket 상태를 확인해주세요."
+
+      - alert: PostgresBackupNeverSucceeded
+        expr: kube_cronjob_spec_suspend{namespace="db",cronjob="pg-backup"} == 0 unless on (namespace, cronjob) kube_cronjob_status_last_successful_time{namespace="db",cronjob="pg-backup"}
+        for: 27h
+        labels:
+          severity: critical
+        annotations:
+          summary: "활성화된 PostgreSQL S3 backup의 정규 성공 기록이 없어요"
+          description: "pg-backup을 활성화한 뒤 27시간 동안 CronJob status에 성공 기록이 없어요. 첫 schedule, controller, Job과 S3 writer 권한을 확인해주세요. 수동 create job은 이 status를 채우지 않아요."
+
+      - alert: PostgresBackupStale
+        expr: kube_cronjob_spec_suspend{namespace="db",cronjob="pg-backup"} == 0 and on (namespace, cronjob) time() - kube_cronjob_status_last_successful_time{namespace="db",cronjob="pg-backup"} > 108000
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "최근 PostgreSQL S3 backup 성공 기록이 없어요"
+          description: "활성화된 pg-backup의 마지막 정규 성공이 30시간을 넘었어요. CronJob, ExternalSecret과 S3 writer 권한을 확인해주세요."
+
+"""
+K3S_DASHBOARD_REPLACEMENTS = {
+    "api-flow.json": (
+        "> trace 샘플링이 1.0 미만이면 HTTP 요청 일부가 누락될 수 있으니, "
+        "시연 시 같은 API 를 여러 번 호출하세요.",
+        "> k3s prod/dev/preview는 trace sampling을 1.0으로 고정합니다. "
+        "요청이 보이지 않으면 Collector의 refused/enqueue/export 경보와 Tempo 상태를 확인하세요.",
+    )
+}
+K3S_PROMETHEUS_COUNTER_REPLACEMENTS = {
+    "rate(otelcol_exporter_send_failed_log_records[5m])": (
+        "(rate(otelcol_exporter_send_failed_log_records[5m]) or "
+        "rate(otelcol_exporter_send_failed_log_records_total[5m]))"
+    ),
+    "rate(otelcol_exporter_send_failed_metric_points[5m])": (
+        "(rate(otelcol_exporter_send_failed_metric_points[5m]) or "
+        "rate(otelcol_exporter_send_failed_metric_points_total[5m]))"
+    ),
+    "rate(otelcol_exporter_send_failed_spans[5m])": (
+        "(rate(otelcol_exporter_send_failed_spans[5m]) or "
+        "rate(otelcol_exporter_send_failed_spans_total[5m]))"
+    ),
+}
 
 
 def block_scalar(text: str, indent: int) -> str:
@@ -123,6 +213,17 @@ def drop_alert_rules(content: str, names: frozenset[str]) -> str:
     return "".join(output)
 
 
+def k3s_dashboard(filename: str, content: str) -> str:
+    """v1 dashboard의 sampling 안내만 k3s의 100% 정책에 맞춘다."""
+    replacement = K3S_DASHBOARD_REPLACEMENTS.get(filename)
+    if replacement is None:
+        return content
+    old, new = replacement
+    if content.count(old) != 1:
+        raise ValueError(f"{filename}에서 교체할 sampling 안내를 정확히 하나 찾지 못했습니다")
+    return content.replace(old, new, 1)
+
+
 def k3s_prometheus_rules(content: str) -> str:
     """v1 compose rule을 실제 k3s scrape topology에 맞춘다."""
     content = drop_alert_rules(content, K3S_DROPPED_ALERTS)
@@ -134,9 +235,20 @@ def k3s_prometheus_rules(content: str) -> str:
         AVAILABILITY_MARKER + K3S_STATIC_ALERTS,
         1,
     )
+    if content.count(OBSERVABILITY_MARKER) != 1:
+        raise ValueError("taple.observability rule group을 정확히 하나 찾지 못했습니다")
+    content = content.replace(
+        OBSERVABILITY_MARKER,
+        OBSERVABILITY_MARKER + K3S_OBSERVABILITY_ALERTS,
+        1,
+    )
+    for old, new in K3S_PROMETHEUS_COUNTER_REPLACEMENTS.items():
+        if content.count(old) != 1:
+            raise ValueError(f"교체할 OTel counter expression을 정확히 하나 찾지 못했습니다: {old}")
+        content = content.replace(old, new, 1)
     return (
-        "# tapple-infra-v2 k3s topology 적용: target 없는 alert와 중복 generic alert 제거, "
-        "render로 확인한 static target 추가\n"
+        "# tapple-infra-v2 k3s topology 적용: target 없는 alert 제거, static target과 "
+        "100% trace 전달 무결성 alert 추가\n"
         + content.rstrip()
         + "\n"
     )
@@ -149,7 +261,12 @@ def main() -> None:
     for f in sorted((SRC / "grafana/dashboards").glob("*.json")):
         name = f"dashboard-{f.stem.replace('_', '-')}"
         (dash_out / f"{f.stem}.yaml").write_text(
-            configmap(name, f.name, f.read_text(), {"grafana_dashboard": "1"})
+            configmap(
+                name,
+                f.name,
+                k3s_dashboard(f.name, f.read_text()),
+                {"grafana_dashboard": "1"},
+            )
         )
         print(f"dashboards/{f.stem}.yaml")
 
